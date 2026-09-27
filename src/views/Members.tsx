@@ -1,350 +1,183 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Search, Plus, Eye, Edit, Trash2, MessageCircle, Loader2, Download, ChevronLeft, ChevronRight } from 'lucide-react';
-import { getMembers, deleteMember, getWhatsAppLink, type Member } from '../services/members';
+import {
+  BadgeIndianRupee, ChevronLeft, ChevronRight, Download, Dumbbell, Edit, Eye, Filter,
+  Loader2, MessageCircle, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, UserCheck, Users, X,
+} from 'lucide-react';
+import { deleteMember, getMembers, getWhatsAppLink, type Member } from '../services/members';
+
+type StatusFilter = 'All' | Member['status'];
+type BalanceFilter = 'All' | 'Due' | 'Clear';
+type TrainingFilter = 'All' | 'With PT' | 'Without PT';
+type SortOption = 'newest' | 'name-asc' | 'name-desc' | 'expiry-soon' | 'balance-high';
+
+const money = (value: unknown) => Math.max(0, Number(value) || 0);
+const formatCurrency = (value: unknown) => `₹${new Intl.NumberFormat('en-IN').format(money(value))}`;
+const dateTime = (value: string) => {
+  const timestamp = new Date(`${value}T00:00:00`).getTime();
+  return Number.isNaN(timestamp) ? Number.MAX_SAFE_INTEGER : timestamp;
+};
+const csvCell = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`;
+
+const statusStyle = (status: Member['status']) => {
+  if (status === 'Active') return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  if (status === 'Expiring') return 'border-amber-200 bg-amber-50 text-amber-700';
+  if (status === 'Expired') return 'border-rose-200 bg-rose-50 text-rose-700';
+  if (status === 'Frozen') return 'border-cyan-200 bg-cyan-50 text-cyan-700';
+  return 'border-slate-200 bg-slate-100 text-slate-700';
+};
+
+const Avatar = ({ member }: { member: Member }) => member.profilePicUrl ? (
+  <img src={member.profilePicUrl} alt={member.fullName} className="h-11 w-11 shrink-0 rounded-2xl border border-slate-200 object-cover shadow-sm" />
+) : (
+  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 font-black text-white shadow-sm">
+    {member.fullName.trim().charAt(0).toUpperCase() || 'M'}
+  </div>
+);
+
+const SelectField = ({ label, value, onChange, children }: { label: string; value: string; onChange: (value: string) => void; children: React.ReactNode }) => (
+  <label className="block min-w-0"><span className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-slate-500">{label}</span><select value={value} onChange={event => onChange(event.target.value)} className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100">{children}</select></label>
+);
 
 export const Members: React.FC = () => {
   const router = useRouter();
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
-  type MemberFilter = 'All' | Member['status'];
-  const [filter, setFilter] = useState<MemberFilter>('All');
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState('');
   const [search, setSearch] = useState('');
-
-  // --- PAGINATION STATE ---
+  const [status, setStatus] = useState<StatusFilter>('All');
+  const [gender, setGender] = useState('All');
+  const [plan, setPlan] = useState('All');
+  const [shift, setShift] = useState('All');
+  const [training, setTraining] = useState<TrainingFilter>('All');
+  const [balance, setBalance] = useState<BalanceFilter>('All');
+  const [sortBy, setSortBy] = useState<SortOption>('newest');
+  const [showFilters, setShowFilters] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
-  const rowsPerPage = 10;
+  const [rowsPerPage, setRowsPerPage] = useState(10);
 
-  const fetchMembers = async () => {
-    setLoading(true);
-    const data = await getMembers();
-    setMembers(data);
-    setLoading(false);
-  };
-
-  useEffect(() => { fetchMembers(); }, []);
-
-  // Reset pagination when search or filter changes
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [search, filter]);
-
-  // --- ACTIONS ---
-  const handleView = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation(); // Prevents row click from firing twice
-    router.push(`/members/${id}`);
-  };
-
-  const handleEdit = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation(); // Prevents row click
-    router.push(`/members/edit/${id}`);
-  };
-
-  const handleDelete = async (e: React.MouseEvent, id: string, name: string) => {
-    e.stopPropagation(); // Prevents row click
-    if (window.confirm(`Are you sure you want to delete ${name}? This action cannot be undone.`)) {
-      await deleteMember(id);
-      fetchMembers(); 
+  const fetchMembers = useCallback(async (quiet = false) => {
+    if (quiet) setRefreshing(true);
+    else setLoading(true);
+    setError('');
+    try {
+      setMembers(await getMembers());
+    } catch (fetchError) {
+      console.error(fetchError);
+      setError('Members could not be loaded. Please check your connection and try again.');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
-  };
+  }, []);
 
-  const handleWhatsApp = (e: React.MouseEvent) => {
-    e.stopPropagation(); // Prevents row click
-  };
+  useEffect(() => { void fetchMembers(); }, [fetchMembers]);
 
-  const handleExport = () => {
-    if (filteredMembers.length === 0) return alert("No members to export.");
-    const separator = ',';
-    const keys = ['Membership ID', 'Full Name', 'Mobile', 'Email', 'Plan', 'Shift', 'Personal Training', 'Personal Training Duration', 'Membership Fee', 'Personal Training Fee', 'Total Fee', 'Start Date', 'Expiry Date', 'Balance Due', 'Status'];
-    
-    const csvContent = [
-      keys.join(separator),
-      ...filteredMembers.map(m => [
-        m.membershipId, 
-        `"${m.fullName}"`, 
-        m.mobileNumber, 
-        m.email || '', 
-        m.planType, 
-        m.accessShift,
-        `"${m.personalTrainingPlanName || 'None'}"`,
-        m.personalTrainingPlanDuration || '',
-        m.membershipFee ?? Math.max(0, m.totalFee - (m.personalTrainingFee || 0)),
-        m.personalTrainingFee || 0,
-        m.totalFee,
-        m.startDate, 
-        m.expiryDate, 
-        m.balanceDue, 
-        m.status
-      ].join(separator))
-    ].join('\n');
+  const genderOptions = useMemo(() => [...new Set(members.map(member => member.gender).filter(Boolean))].sort(), [members]);
+  const planOptions = useMemo(() => [...new Set(members.map(member => member.planType).filter(Boolean))].sort(), [members]);
+  const shiftOptions = useMemo(() => [...new Set(members.map(member => member.accessShift).filter(Boolean))].sort(), [members]);
+  const statusCounts = useMemo(() => {
+    const counts: Record<string, number> = { All: members.length };
+    members.forEach(member => { counts[member.status] = (counts[member.status] || 0) + 1; });
+    return counts;
+  }, [members]);
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `MRGYM_Members_${new Date().toISOString().split('T')[0]}.csv`;
-    link.click();
-  };
+  const filteredMembers = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    const result = members.filter(member => {
+      const matchesSearch = !term || [member.fullName, member.membershipId, member.mobileNumber, member.email]
+        .some(value => String(value || '').toLowerCase().includes(term));
+      const hasTraining = money(member.personalTrainingFee) > 0 || Boolean(member.personalTrainingPlanId);
+      return matchesSearch
+        && (status === 'All' || member.status === status)
+        && (gender === 'All' || member.gender === gender)
+        && (plan === 'All' || member.planType === plan)
+        && (shift === 'All' || member.accessShift === shift)
+        && (training === 'All' || (training === 'With PT' ? hasTraining : !hasTraining))
+        && (balance === 'All' || (balance === 'Due' ? money(member.balanceDue) > 0 : money(member.balanceDue) === 0));
+    });
+    return result.sort((a, b) => {
+      if (sortBy === 'name-asc') return a.fullName.localeCompare(b.fullName);
+      if (sortBy === 'name-desc') return b.fullName.localeCompare(a.fullName);
+      if (sortBy === 'expiry-soon') return dateTime(a.expiryDate) - dateTime(b.expiryDate);
+      if (sortBy === 'balance-high') return money(b.balanceDue) - money(a.balanceDue);
+      return 0;
+    });
+  }, [balance, gender, members, plan, search, shift, sortBy, status, training]);
 
-  // --- FILTERING ---
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'Active': return 'bg-[#16A34A]/10 text-[#16A34A] border-[#16A34A]/20';
-      case 'Expiring': return 'bg-[#D97706]/10 text-[#D97706] border-[#D97706]/20';
-      case 'Expired': return 'bg-[#DC2626]/10 text-[#DC2626] border-[#DC2626]/20';
-      case 'Frozen': return 'bg-[#6B7280]/10 text-[#6B7280] border-[#6B7280]/20';
-      case 'Cancelled': return 'bg-gray-100 text-gray-800 border-gray-200';
-      default: return 'bg-gray-100 text-gray-800 border-gray-200';
-    }
-  };
+  const activeFilterCount = [status !== 'All', gender !== 'All', plan !== 'All', shift !== 'All', training !== 'All', balance !== 'All', sortBy !== 'newest'].filter(Boolean).length;
+  const summary = useMemo(() => ({
+    total: members.length,
+    active: members.filter(member => member.status === 'Active').length,
+    attention: members.filter(member => ['Expiring', 'Expired'].includes(member.status)).length,
+    training: members.filter(member => money(member.personalTrainingFee) > 0 || member.personalTrainingPlanId).length,
+    due: members.reduce((sum, member) => sum + money(member.balanceDue), 0),
+  }), [members]);
 
-  const filteredMembers = members.filter(m => {
-    const searchLower = search.trim().toLowerCase();
-    const matchesSearch = 
-      m.fullName.toLowerCase().includes(searchLower) || 
-      m.membershipId.toLowerCase().includes(searchLower) || 
-      m.mobileNumber.includes(search.trim()) || 
-      (m.email && m.email.toLowerCase().includes(searchLower)); 
-      
-    const matchesFilter = filter === 'All' || m.status === filter;
-    return matchesSearch && matchesFilter;
-  });
-
-  // --- PAGINATION LOGIC ---
-  const totalPages = Math.ceil(filteredMembers.length / rowsPerPage);
+  useEffect(() => { setCurrentPage(1); }, [search, status, gender, plan, shift, training, balance, sortBy, rowsPerPage]);
+  const totalPages = Math.max(1, Math.ceil(filteredMembers.length / rowsPerPage));
+  useEffect(() => { setCurrentPage(page => Math.min(page, totalPages)); }, [totalPages]);
   const startIndex = (currentPage - 1) * rowsPerPage;
   const currentData = filteredMembers.slice(startIndex, startIndex + rowsPerPage);
 
-  // Reusable Avatar Component
-  const Avatar = ({ url, name }: { url?: string | null, name: string }) => (
-    url ? (
-      <img src={url} alt={name} className="h-10 w-10 sm:h-9 sm:w-9 rounded-full object-cover border border-gray-200 shrink-0" />
-    ) : (
-      <div className="h-10 w-10 sm:h-9 sm:w-9 rounded-full bg-[#F3F4F6] flex items-center justify-center text-[#6B7280] font-bold border border-gray-200 shrink-0">
-        {name.charAt(0).toUpperCase()}
-      </div>
-    )
-  );
+  const clearFilters = () => {
+    setSearch(''); setStatus('All'); setGender('All'); setPlan('All'); setShift('All');
+    setTraining('All'); setBalance('All'); setSortBy('newest');
+  };
 
+  const handleDelete = async (event: React.MouseEvent, member: Member) => {
+    event.stopPropagation();
+    if (!window.confirm(`Delete ${member.fullName}? The member and membership details will be permanently removed.`)) return;
+    try {
+      await deleteMember(member.id);
+      setMembers(current => current.filter(item => item.id !== member.id));
+    } catch (deleteError) {
+      console.error(deleteError);
+      setError('The member could not be deleted. Please try again.');
+    }
+  };
+
+  const handleExport = () => {
+    if (!filteredMembers.length) return window.alert('No members match the selected filters.');
+    const headings = ['Membership ID', 'Full Name', 'Gender', 'Mobile', 'Email', 'Plan', 'Shift', 'Personal Training', 'Start Date', 'Expiry Date', 'Total Fee', 'Paid', 'Balance Due', 'Status'];
+    const rows = filteredMembers.map(member => [member.membershipId, member.fullName, member.gender, member.mobileNumber, member.email, member.planType, member.accessShift, member.personalTrainingPlanName || 'No', member.startDate, member.expiryDate, money(member.totalFee), money(member.amountPaid), money(member.balanceDue), member.status].map(csvCell).join(','));
+    const blob = new Blob([[headings.map(csvCell).join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = `MRGYM_Members_${new Date().toISOString().slice(0, 10)}.csv`; link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const go = (event: React.MouseEvent, path: string) => { event.stopPropagation(); router.push(path); };
   return (
-    <div className="space-y-4 sm:space-y-6 pb-6">
-      
-      {/* HEADER & CONTROLS */}
-      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 bg-white p-5 rounded-xl border border-[#E5E7EB] shadow-sm">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-[#1F2937]">Members</h1>
-            <span className="bg-[#2563EB]/10 text-[#2563EB] text-xs font-bold px-2.5 py-1 rounded-full">
-              {filteredMembers.length}
-            </span>
-          </div>
-          <p className="text-sm text-[#6B7280] mt-1">Manage gym memberships and member information</p>
+    <div className="space-y-5 pb-8">
+      <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-slate-950 via-blue-950 to-blue-700 p-5 text-white shadow-xl sm:p-7">
+        <div className="absolute -right-16 -top-20 h-56 w-56 rounded-full bg-cyan-400/20 blur-3xl" />
+        <div className="relative flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+          <div><div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-xs font-bold text-blue-100"><Users className="h-3.5 w-3.5" /> Member directory</div><h1 className="text-2xl font-black tracking-tight sm:text-3xl">Know every member. Act faster.</h1><p className="mt-2 max-w-xl text-sm leading-6 text-blue-100">Search, segment and manage the complete member base from one responsive workspace.</p></div>
+          <div className="grid grid-cols-2 gap-2 sm:flex"><button onClick={() => void fetchMembers(true)} disabled={refreshing} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/10 px-4 text-sm font-bold backdrop-blur transition hover:bg-white/20 disabled:opacity-60"><RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} /> Refresh</button><button onClick={handleExport} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/10 px-4 text-sm font-bold backdrop-blur transition hover:bg-white/20"><Download className="h-4 w-4" /> Export</button><button onClick={() => router.push('/members/add')} className="col-span-2 inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-white px-5 text-sm font-black text-blue-700 shadow-lg transition hover:-translate-y-0.5 sm:col-span-1"><Plus className="h-4 w-4" /> Add member</button></div>
         </div>
-        
-        <div className="flex flex-col sm:flex-row w-full lg:w-auto gap-3">
-          <div className="relative flex-1 sm:w-72">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-[#9CA3AF]" />
-            <input 
-              type="text" 
-              placeholder="Search by name, ID, mobile, email..." 
-              value={search} 
-              onChange={(e) => setSearch(e.target.value)} 
-              className="w-full h-11 pl-10 pr-4 rounded-lg border border-[#E5E7EB] focus:ring-2 focus:ring-[#2563EB]/20 focus:border-[#2563EB] outline-none text-sm transition-shadow" 
-            />
-          </div>
-          <div className="grid grid-cols-2 sm:flex gap-2 w-full sm:w-auto">
-            <button onClick={handleExport} className="flex h-11 w-full sm:w-auto px-3 sm:px-4 bg-white border border-[#E5E7EB] text-[#4B5563] rounded-lg items-center justify-center gap-2 text-sm font-medium hover:bg-gray-50 transition-colors">
-              <Download className="h-4 w-4" /> Export CSV
-            </button>
-            <button onClick={() => router.push('/members/add')} className="flex h-11 w-full sm:w-auto px-3 sm:px-4 bg-[#2563EB] text-white rounded-lg items-center justify-center gap-2 text-sm font-medium hover:bg-[#1D4ED8] transition-colors">
-              <Plus className="h-4 w-4" /> Add Member
-            </button>
-          </div>
-        </div>
-      </div>
+      </section>
 
-      {/* FILTER TABS */}
-      <div className="flex overflow-x-auto gap-2 pb-1 hide-scrollbar">
-        {(['All', 'Active', 'Expiring', 'Expired', 'Frozen', 'Cancelled'] as MemberFilter[]).map(f => (
-          <button 
-            key={f} 
-            onClick={() => setFilter(f)} 
-            className={`px-4 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors ${filter === f ? 'bg-[#2563EB] text-white shadow-sm' : 'bg-white border border-[#E5E7EB] text-[#6B7280] hover:bg-gray-50'}`}
-          >
-            {f} ({f === 'All' ? members.length : members.filter(member => member.status === f).length})
-          </button>
-        ))}
-      </div>
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        {[{ label: 'All members', value: summary.total, icon: Users, color: 'text-blue-700 bg-blue-50' }, { label: 'Active', value: summary.active, icon: UserCheck, color: 'text-emerald-700 bg-emerald-50' }, { label: 'Need attention', value: summary.attention, icon: RefreshCw, color: 'text-amber-700 bg-amber-50' }, { label: 'Personal training', value: summary.training, icon: Dumbbell, color: 'text-violet-700 bg-violet-50' }, { label: 'Total outstanding', value: formatCurrency(summary.due), icon: BadgeIndianRupee, color: 'text-rose-700 bg-rose-50' }].map((item, index) => <article key={item.label} className={`rounded-2xl border border-slate-200 bg-white p-4 shadow-sm ${index === 4 ? 'col-span-2 lg:col-span-1' : ''}`}><div className={`flex h-9 w-9 items-center justify-center rounded-xl ${item.color}`}><item.icon className="h-4 w-4" /></div><p className="mt-3 text-xl font-black text-slate-900 sm:text-2xl">{item.value}</p><p className="mt-1 text-xs font-semibold text-slate-500">{item.label}</p></article>)}
+      </section>
 
-      {loading ? (
-        <div className="flex justify-center items-center py-20"><Loader2 className="h-8 w-8 animate-spin text-[#2563EB]" /></div>
-      ) : filteredMembers.length === 0 ? (
-        <div className="text-center py-20 bg-white rounded-xl border border-[#E5E7EB] text-[#6B7280] shadow-sm">
-          No members found matching your search.
-        </div>
-      ) : (
-        <>
-          {/* --- DESKTOP TABLE --- */}
-          <div className="hidden sm:block bg-white border border-[#E5E7EB] rounded-xl overflow-hidden shadow-sm">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm whitespace-nowrap">
-                <thead className="bg-[#F9FAFB] border-b border-[#E5E7EB]">
-                  <tr className="text-[#6B7280]">
-                    <th className="px-4 py-3 font-medium">Member</th>
-                    <th className="px-4 py-3 font-medium">Contact / ID</th>
-                    <th className="px-4 py-3 font-medium">Plan / Shift</th>
-                    <th className="px-4 py-3 font-medium">Timeline</th>
-                    <th className="px-4 py-3 font-medium">Balance</th>
-                    <th className="px-4 py-3 font-medium">Status</th>
-                    <th className="px-4 py-3 font-medium text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#E5E7EB]">
-                  {currentData.map(m => (
-                    <tr 
-                      key={m.id} 
-                      onClick={() => router.push(`/members/${m.id}`)} 
-                      className="hover:bg-[#F9FAFB] cursor-pointer transition-colors"
-                    >
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <Avatar url={m.profilePicUrl} name={m.fullName} />
-                          <span className="font-bold text-[#1F2937]">{m.fullName}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-[#4B5563]">
-                        <div className="font-medium text-[#1F2937]">{m.membershipId}</div>
-                        <div className="text-xs text-[#6B7280]">{m.mobileNumber}</div>
-                      </td>
-                      <td className="px-4 py-3 text-[#4B5563]">
-                        <div className="font-medium">{m.planType}</div>
-                        <div className="text-xs text-[#6B7280]">{m.accessShift}</div>
-                        {(m.personalTrainingFee || 0) > 0 && <div className="text-[11px] text-cyan-700">PT: {m.personalTrainingPlanName || 'Personal Training'}</div>}
-                      </td>
-                      <td className="px-4 py-3 text-[#4B5563]">
-                        <div className="text-xs">Start: <span className="font-medium">{m.startDate}</span></div>
-                        <div className="text-xs">Exp: <span className="font-medium">{m.expiryDate}</span></div>
-                      </td>
-                      <td className="px-4 py-3 font-bold text-[#1F2937]">₹{m.balanceDue}</td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex px-2.5 py-1 text-xs font-medium border rounded-md ${getStatusColor(m.status)}`}>
-                          {m.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <div className="flex justify-end gap-2">
-                          <button onClick={(e) => handleView(e, m.id)} title="View Member Details" className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-bold text-[#2563EB] transition-colors hover:border-blue-300 hover:bg-blue-100"><Eye className="h-4 w-4" /> View details</button>
-                          <button onClick={(e) => handleEdit(e, m.id)} title="Edit Member" className="p-1.5 text-[#6B7280] hover:text-[#2563EB] bg-gray-50 rounded-md border border-[#E5E7EB] transition-colors"><Edit className="h-4 w-4" /></button>
-                          <a href={getWhatsAppLink(m)} target="_blank" rel="noreferrer" onClick={handleWhatsApp} title="WhatsApp" className="p-1.5 text-white bg-[#25D366] hover:bg-[#20bd5a] rounded-md shadow-sm transition-colors"><MessageCircle className="h-4 w-4" /></a>
-                          <button onClick={(e) => handleDelete(e, m.id, m.fullName)} title="Delete Member" className="p-1.5 text-[#6B7280] hover:text-[#DC2626] bg-gray-50 rounded-md border border-[#E5E7EB] transition-colors"><Trash2 className="h-4 w-4" /></button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+      <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center"><div className="relative flex-1"><Search className="absolute left-3.5 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search name, member ID, mobile or email..." className="h-12 w-full rounded-xl border border-slate-200 bg-slate-50 pl-11 pr-10 text-sm outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100" />{search ? <button onClick={() => setSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-1 text-slate-400 hover:bg-slate-200"><X className="h-4 w-4" /></button> : null}</div><div className="grid grid-cols-2 gap-2 sm:flex"><button onClick={() => setShowFilters(value => !value)} className={`inline-flex h-12 items-center justify-center gap-2 rounded-xl border px-4 text-sm font-bold transition ${showFilters || activeFilterCount ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}><SlidersHorizontal className="h-4 w-4" /> Filters {activeFilterCount ? <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10px] text-white">{activeFilterCount}</span> : null}</button><select value={sortBy} onChange={event => setSortBy(event.target.value as SortOption)} className="h-12 rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 outline-none focus:border-blue-500"><option value="newest">Newest first</option><option value="name-asc">Name A–Z</option><option value="name-desc">Name Z–A</option><option value="expiry-soon">Expiry soon</option><option value="balance-high">Highest balance</option></select></div></div>
+        <div className="mt-3 flex gap-2 overflow-x-auto pb-1">{(['All', 'Active', 'Expiring', 'Expired', 'Frozen', 'Cancelled'] as StatusFilter[]).map(item => <button key={item} onClick={() => setStatus(item)} className={`whitespace-nowrap rounded-full px-3.5 py-2 text-xs font-bold transition ${status === item ? 'bg-blue-600 text-white shadow-md shadow-blue-200' : 'border border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:text-blue-700'}`}>{item} <span className={status === item ? 'text-blue-100' : 'text-slate-400'}>{statusCounts[item] || 0}</span></button>)}</div>
+        {showFilters ? <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/40 p-4"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><SelectField label="Gender" value={gender} onChange={setGender}><option value="All">All genders</option>{genderOptions.map(item => <option key={item}>{item}</option>)}</SelectField><SelectField label="Plan" value={plan} onChange={setPlan}><option value="All">All plans</option>{planOptions.map(item => <option key={item}>{item}</option>)}</SelectField><SelectField label="Shift" value={shift} onChange={setShift}><option value="All">All shifts</option>{shiftOptions.map(item => <option key={item}>{item}</option>)}</SelectField><SelectField label="Personal training" value={training} onChange={value => setTraining(value as TrainingFilter)}><option value="All">All members</option><option value="With PT">With PT</option><option value="Without PT">Without PT</option></SelectField><SelectField label="Payment balance" value={balance} onChange={value => setBalance(value as BalanceFilter)}><option value="All">Any balance</option><option value="Due">Balance due</option><option value="Clear">Fully clear</option></SelectField></div><div className="mt-4 flex items-center justify-between"><p className="text-xs font-semibold text-slate-500"><Filter className="mr-1 inline h-3.5 w-3.5" />{filteredMembers.length} members match</p><button onClick={clearFilters} className="text-xs font-black text-blue-700 hover:text-blue-900">Clear all filters</button></div></div> : null}
+      </section>
 
-              {/* Desktop Pagination Controls */}
-              {totalPages > 1 && (
-                <div className="flex items-center justify-between px-4 py-3 border-t border-[#E5E7EB] bg-white">
-                  <div className="text-sm text-[#6B7280]">
-                    Showing <span className="font-medium text-[#1F2937]">{startIndex + 1}</span> to <span className="font-medium text-[#1F2937]">{Math.min(startIndex + rowsPerPage, filteredMembers.length)}</span> of <span className="font-medium text-[#1F2937]">{filteredMembers.length}</span> results
-                  </div>
-                  <div className="flex gap-2">
-                    <button 
-                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))} 
-                      disabled={currentPage === 1}
-                      className="p-1.5 rounded-md border border-[#E5E7EB] text-[#4B5563] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors"
-                    >
-                      <ChevronLeft className="w-5 h-5" />
-                    </button>
-                    <button 
-                      onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} 
-                      disabled={currentPage === totalPages}
-                      className="p-1.5 rounded-md border border-[#E5E7EB] text-[#4B5563] disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors"
-                    >
-                      <ChevronRight className="w-5 h-5" />
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* --- MOBILE CARDS --- */}
-          <div className="sm:hidden space-y-3">
-             {currentData.map(m => (
-              <div 
-                key={m.id} 
-                onClick={() => router.push(`/members/${m.id}`)}
-                className="bg-white p-4 rounded-xl border border-[#E5E7EB] shadow-sm flex flex-col gap-3 active:bg-gray-50 transition-colors cursor-pointer"
-              >
-                 <div className="flex justify-between items-start">
-                   <div className="flex items-center gap-3">
-                     <Avatar url={m.profilePicUrl} name={m.fullName} />
-                     <div>
-                       <h3 className="font-bold text-[#1F2937] text-base leading-tight">{m.fullName}</h3>
-                       <p className="text-xs text-[#6B7280] font-medium">{m.membershipId}</p>
-                     </div>
-                   </div>
-                   <span className={`px-2 py-0.5 text-[10px] uppercase tracking-wider font-bold border rounded-md ${getStatusColor(m.status)}`}>
-                     {m.status}
-                   </span>
-                 </div>
-                 
-                 <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm bg-[#F9FAFB] p-3 rounded-lg border border-[#F3F4F6]">
-                   <div>
-                     <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF] font-bold mb-0.5">Plan</p>
-                     <p className="font-semibold text-[#4B5563] text-xs">{m.planType}</p>
-                   </div>
-                   <div>
-                     <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF] font-bold mb-0.5">Shift</p>
-                     <p className="font-semibold text-[#4B5563] text-xs">{m.accessShift}</p>
-                   </div>
-                   <div>
-                     <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF] font-bold mb-0.5">Mobile</p>
-                     <p className="font-semibold text-[#4B5563] text-xs break-all">{m.mobileNumber}</p>
-                   </div>
-                   <div>
-                     <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF] font-bold mb-0.5">Start</p>
-                     <p className="font-semibold text-[#4B5563] text-xs">{m.startDate}</p>
-                   </div>
-                   <div className="col-span-2">
-                     <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF] font-bold mb-0.5">Expiry</p>
-                     <p className="font-semibold text-[#4B5563] text-xs">{m.expiryDate}</p>
-                   </div>
-                   {(m.personalTrainingFee || 0) > 0 && <div className="col-span-2"><p className="text-[10px] uppercase tracking-wider text-cyan-700 font-bold mb-0.5">Personal Training</p><p className="font-semibold text-cyan-800 text-xs">{m.personalTrainingPlanName || 'Personal Training'}{m.personalTrainingPlanDuration ? ` · ${m.personalTrainingPlanDuration}` : ''} · ₹{m.personalTrainingFee}</p></div>}
-                 </div>
-
-                 <div className="flex justify-between items-center gap-3 mt-1">
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wider text-[#9CA3AF] font-bold">Balance</p>
-                      <p className={`font-bold ${m.balanceDue > 0 ? 'text-[#DC2626]' : 'text-[#16A34A]'}`}>₹{m.balanceDue}</p>
-                    </div>
-                 </div>
-
-                 <div className="grid grid-cols-2 gap-2 pt-3 border-t border-[#F3F4F6]">
-                   <button onClick={(e) => handleView(e, m.id)} className="h-10 flex items-center justify-center gap-2 text-xs font-semibold text-[#2563EB] bg-[#2563EB]/10 rounded-lg"><Eye className="h-4 w-4" /> View details</button>
-                   <button onClick={(e) => handleEdit(e, m.id)} className="h-10 flex items-center justify-center gap-2 text-xs font-semibold text-[#4B5563] bg-gray-100 rounded-lg"><Edit className="h-4 w-4" /> Edit</button>
-                   <a href={getWhatsAppLink(m)} target="_blank" rel="noreferrer" onClick={handleWhatsApp} className="h-10 flex items-center justify-center gap-2 text-xs font-semibold text-white bg-[#25D366] rounded-lg shadow-sm"><MessageCircle className="h-4 w-4" /> WhatsApp</a>
-                   <button onClick={(e) => handleDelete(e, m.id, m.fullName)} className="h-10 flex items-center justify-center gap-2 text-xs font-semibold text-[#DC2626] bg-[#DC2626]/10 rounded-lg"><Trash2 className="h-4 w-4" /> Delete</button>
-                 </div>
-              </div>
-            ))}
-
-            {/* Mobile Pagination Controls */}
-            {totalPages > 1 && (
-              <div className="flex items-center justify-between px-2 py-2 mt-4">
-                <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-4 py-2 bg-white border border-[#E5E7EB] rounded-lg text-sm font-medium text-[#4B5563] disabled:opacity-50 shadow-sm">Prev</button>
-                <span className="text-sm font-medium text-[#6B7280]">Page {currentPage} of {totalPages}</span>
-                <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-4 py-2 bg-white border border-[#E5E7EB] rounded-lg text-sm font-medium text-[#4B5563] disabled:opacity-50 shadow-sm">Next</button>
-              </div>
-             )}
-          </div>
-        </>
-      )}
-      
+      {error ? <div className="flex items-center justify-between rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-700"><span>{error}</span><button onClick={() => void fetchMembers()} className="rounded-lg bg-rose-100 px-3 py-1.5 font-bold">Retry</button></div> : null}
+      {loading ? <div className="flex min-h-72 items-center justify-center rounded-2xl border border-slate-200 bg-white"><Loader2 className="h-8 w-8 animate-spin text-blue-600" /></div> : filteredMembers.length === 0 ? <div className="rounded-3xl border border-dashed border-slate-300 bg-white px-6 py-16 text-center"><div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100"><Search className="h-6 w-6 text-slate-400" /></div><h2 className="mt-4 text-lg font-black text-slate-800">No members found</h2><p className="mt-1 text-sm text-slate-500">Try changing your search or filters.</p><button onClick={clearFilters} className="mt-5 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white">Reset filters</button></div> : <>
+        <section className="hidden overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm md:block"><div className="overflow-x-auto"><table className="w-full min-w-[1120px] text-left text-sm"><thead className="border-b border-slate-200 bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-4">Member</th><th className="px-4 py-4">Gender / Contact</th><th className="px-4 py-4">Membership</th><th className="px-4 py-4">Timeline</th><th className="px-4 py-4">Financials</th><th className="px-4 py-4">Status</th><th className="px-5 py-4 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{currentData.map(member => <tr key={member.id} onClick={() => router.push(`/members/${member.id}`)} className="cursor-pointer transition hover:bg-blue-50/40"><td className="px-5 py-4"><div className="flex items-center gap-3"><Avatar member={member} /><div className="min-w-0"><p className="max-w-52 truncate font-black text-slate-900">{member.fullName}</p><p className="mt-0.5 text-xs font-semibold text-blue-600">{member.membershipId}</p></div></div></td><td className="px-4 py-4"><p className="font-semibold text-slate-700">{member.gender || 'Not specified'}</p><p className="mt-1 text-xs text-slate-500">{member.mobileNumber}</p></td><td className="px-4 py-4"><p className="font-bold text-slate-800">{member.planType}</p><p className="mt-1 text-xs text-slate-500">{member.accessShift} shift</p>{money(member.personalTrainingFee) > 0 ? <span className="mt-1.5 inline-flex rounded-full bg-violet-50 px-2 py-0.5 text-[10px] font-bold text-violet-700">Personal training</span> : null}</td><td className="px-4 py-4"><p className="text-xs text-slate-500">Starts <b className="text-slate-700">{member.startDate}</b></p><p className="mt-1 text-xs text-slate-500">Expires <b className="text-slate-700">{member.expiryDate}</b></p></td><td className="px-4 py-4"><p className="font-black text-slate-900">{formatCurrency(member.totalFee)}</p><p className={`mt-1 text-xs font-bold ${money(member.balanceDue) ? 'text-rose-600' : 'text-emerald-600'}`}>{money(member.balanceDue) ? `${formatCurrency(member.balanceDue)} due` : 'Fully paid'}</p></td><td className="px-4 py-4"><span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-bold ${statusStyle(member.status)}`}>{member.status}</span></td><td className="px-5 py-4"><div className="flex justify-end gap-2"><button onClick={event => go(event, `/members/${member.id}`)} className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-bold text-white"><Eye className="h-3.5 w-3.5" /> Details</button><button onClick={event => go(event, `/members/edit/${member.id}`)} title="Edit" className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:border-blue-200 hover:text-blue-700"><Edit className="h-4 w-4" /></button><a href={getWhatsAppLink(member)} target="_blank" rel="noreferrer" onClick={event => event.stopPropagation()} title="WhatsApp" className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500 text-white"><MessageCircle className="h-4 w-4" /></a><button onClick={event => void handleDelete(event, member)} title="Delete" className="flex h-9 w-9 items-center justify-center rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50"><Trash2 className="h-4 w-4" /></button></div></td></tr>)}</tbody></table></div></section>
+        <section className="space-y-3 md:hidden">{currentData.map(member => <article key={member.id} onClick={() => router.push(`/members/${member.id}`)} className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm transition active:scale-[0.99]"><div className="h-1.5 bg-gradient-to-r from-blue-600 via-cyan-400 to-violet-500" /><div className="p-4"><div className="flex items-start gap-3"><Avatar member={member} /><div className="min-w-0 flex-1"><h3 className="truncate font-black text-slate-900">{member.fullName}</h3><p className="mt-0.5 text-xs font-bold text-blue-600">{member.membershipId} · {member.gender || '—'}</p></div><span className={`rounded-full border px-2 py-1 text-[10px] font-black ${statusStyle(member.status)}`}>{member.status}</span></div><div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-2xl bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Plan & shift</p><p className="mt-1 truncate text-xs font-black text-slate-800">{member.planType}</p><p className="mt-0.5 text-[11px] text-slate-500">{member.accessShift}</p></div><div className="rounded-2xl bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Expires</p><p className="mt-1 text-xs font-black text-slate-800">{member.expiryDate}</p><p className={`mt-0.5 text-[11px] font-bold ${money(member.balanceDue) ? 'text-rose-600' : 'text-emerald-600'}`}>{money(member.balanceDue) ? `${formatCurrency(member.balanceDue)} due` : 'Payment clear'}</p></div></div>{money(member.personalTrainingFee) > 0 ? <div className="mt-2 flex items-center gap-2 rounded-xl bg-violet-50 px-3 py-2 text-xs font-bold text-violet-700"><Dumbbell className="h-4 w-4" /> {member.personalTrainingPlanName || 'Personal training'} · {formatCurrency(member.personalTrainingFee)}</div> : null}<div className="mt-4 grid grid-cols-4 gap-2 border-t border-slate-100 pt-4"><button onClick={event => go(event, `/members/${member.id}`)} className="col-span-2 inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 text-xs font-black text-white"><Eye className="h-4 w-4" /> View details</button><button onClick={event => go(event, `/members/edit/${member.id}`)} className="flex h-10 items-center justify-center rounded-xl bg-slate-100 text-slate-700"><Edit className="h-4 w-4" /></button><a href={getWhatsAppLink(member)} target="_blank" rel="noreferrer" onClick={event => event.stopPropagation()} className="flex h-10 items-center justify-center rounded-xl bg-emerald-500 text-white"><MessageCircle className="h-4 w-4" /></a></div></div></article>)}</section>
+        <section className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-2 text-xs font-semibold text-slate-500"><span>Showing {startIndex + 1}–{Math.min(startIndex + rowsPerPage, filteredMembers.length)} of {filteredMembers.length}</span><select value={rowsPerPage} onChange={event => setRowsPerPage(Number(event.target.value))} className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 font-bold text-slate-700"><option value={10}>10/page</option><option value={20}>20/page</option><option value={50}>50/page</option></select></div><div className="flex items-center justify-between gap-2 sm:justify-end"><button onClick={() => setCurrentPage(page => Math.max(1, page - 1))} disabled={currentPage === 1} className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-600 disabled:opacity-40"><ChevronLeft className="h-5 w-5" /></button><span className="min-w-24 text-center text-xs font-black text-slate-700">Page {currentPage} of {totalPages}</span><button onClick={() => setCurrentPage(page => Math.min(totalPages, page + 1))} disabled={currentPage === totalPages} className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-600 disabled:opacity-40"><ChevronRight className="h-5 w-5" /></button></div></section>
+      </>}
     </div>
   );
 };

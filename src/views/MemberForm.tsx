@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, Camera, Loader2 } from 'lucide-react';
+import { ArrowLeft, Camera, Loader2, RotateCcw, Trash2, Upload } from 'lucide-react';
 import { addMember, getMember, updateMember, type Member } from '../services/members';
 import { getPlans, getPersonalTrainingPlans, type Plan } from '../services/settings';
 
@@ -19,7 +19,10 @@ export const MemberForm: React.FC = () => {
   const [membershipId, setMembershipId] = useState('');
   const [profilePic, setProfilePic] = useState<File | null>(null);
   const [profilePicPreview, setProfilePicPreview] = useState<string | null>(null);
+  const [savedProfilePicUrl, setSavedProfilePicUrl] = useState<string | null>(null);
+  const [removeProfilePic, setRemoveProfilePic] = useState(false);
   const [originalStatus, setOriginalStatus] = useState<Member['status']>('Active');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [formData, setFormData] = useState({
     fullName: '', mobileNumber: '', email: '', dateOfBirth: '',
@@ -51,6 +54,7 @@ export const MemberForm: React.FC = () => {
           setMembershipId(member.membershipId);
           setOriginalStatus(member.status);
           setProfilePicPreview(member.profilePicUrl);
+          setSavedProfilePicUrl(member.profilePicUrl);
           setFormData({
             fullName: member.fullName,
             mobileNumber: member.mobileNumber,
@@ -96,7 +100,28 @@ export const MemberForm: React.FC = () => {
       const file = e.target.files[0];
       setProfilePic(file);
       setProfilePicPreview(URL.createObjectURL(file));
+      setRemoveProfilePic(false);
     }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (profilePicPreview?.startsWith('blob:')) URL.revokeObjectURL(profilePicPreview);
+    };
+  }, [profilePicPreview]);
+
+  const handleRemovePhoto = () => {
+    setProfilePic(null);
+    setProfilePicPreview(null);
+    setRemoveProfilePic(Boolean(savedProfilePicUrl));
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleUndoPhotoRemoval = () => {
+    setProfilePic(null);
+    setProfilePicPreview(savedProfilePicUrl);
+    setRemoveProfilePic(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handlePlanChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -160,6 +185,11 @@ export const MemberForm: React.FC = () => {
         balanceDue,
         status: isEditMode ? originalStatus : 'Active',
       };
+
+      if (removeProfilePic) {
+        payload.profilePicUrl = null;
+        payload.profilePicPath = null;
+      }
       
       if (isEditMode && id) {
         await updateMember(id, payload, profilePic);
@@ -188,14 +218,31 @@ export const MemberForm: React.FC = () => {
 
       <form onSubmit={handleSubmit} className="space-y-6">
         
-        <div className="bg-white p-5 rounded-xl border border-[#E5E7EB] shadow-sm flex flex-col items-center justify-center">
-          <div className="relative">
-            <div className="h-24 w-24 rounded-full bg-[#F3F4F6] border-2 border-dashed border-[#D1D5DB] flex items-center justify-center overflow-hidden">
-              {profilePicPreview ? <img src={profilePicPreview} alt="Preview" className="h-full w-full object-cover" /> : <Camera className="h-8 w-8 text-[#9CA3AF]" />}
+        <div className="overflow-hidden rounded-2xl border border-[#E5E7EB] bg-white shadow-sm">
+          <div className="h-1.5 bg-gradient-to-r from-[#2563EB] via-cyan-400 to-violet-500" />
+          <div className="flex flex-col items-center justify-center p-5 sm:flex-row sm:justify-start sm:gap-6 sm:p-6">
+            <div className="relative">
+              <div className="flex h-28 w-28 items-center justify-center overflow-hidden rounded-3xl border-2 border-dashed border-[#D1D5DB] bg-[#F3F4F6] shadow-inner">
+                {profilePicPreview ? <img src={profilePicPreview} alt="Member profile preview" className="h-full w-full object-cover" /> : <Camera className="h-9 w-9 text-[#9CA3AF]" />}
+              </div>
+              {profilePicPreview ? <span className="absolute -bottom-1 -right-1 flex h-8 w-8 items-center justify-center rounded-full border-4 border-white bg-emerald-500 text-white"><Camera className="h-3.5 w-3.5" /></span> : null}
             </div>
-            <input type="file" accept="image/*" onChange={handleImageChange} className="absolute inset-0 opacity-0 cursor-pointer" />
+
+            <div className="mt-5 w-full text-center sm:mt-0 sm:w-auto sm:text-left">
+              <h2 className="font-bold text-[#1F2937]">Profile picture</h2>
+              <p className="mt-1 text-xs leading-5 text-[#6B7280]">JPEG, PNG or WebP. Use a clear photo under 5 MB.</p>
+              <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={handleImageChange} className="hidden" />
+              <div className="mt-4 grid grid-cols-1 gap-2 min-[390px]:grid-cols-2 sm:flex">
+                <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-[#2563EB] px-4 text-xs font-bold text-white transition hover:bg-[#1D4ED8]">
+                  <Upload className="h-4 w-4" /> {profilePicPreview ? 'Change photo' : 'Upload photo'}
+                </button>
+                {profilePicPreview ? <button type="button" onClick={handleRemovePhoto} className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 text-xs font-bold text-red-600 transition hover:bg-red-100"><Trash2 className="h-4 w-4" /> Remove photo</button> : null}
+                {removeProfilePic && savedProfilePicUrl ? <button type="button" onClick={handleUndoPhotoRemoval} className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-xs font-bold text-slate-600 transition hover:bg-slate-50 min-[390px]:col-span-2"><RotateCcw className="h-4 w-4" /> Undo removal</button> : null}
+              </div>
+              {profilePic ? <p className="mt-2 max-w-xs truncate text-xs font-medium text-emerald-600">Selected: {profilePic.name}</p> : null}
+              {removeProfilePic ? <p className="mt-2 text-xs font-semibold text-red-600">The saved photo will be removed when you save changes.</p> : null}
+            </div>
           </div>
-          <p className="text-sm font-medium text-[#2563EB] mt-3">{isEditMode ? 'Change Photo' : 'Upload Photo (Optional)'}</p>
         </div>
 
         <div className="bg-white p-5 rounded-xl border border-[#E5E7EB] shadow-sm space-y-4">
