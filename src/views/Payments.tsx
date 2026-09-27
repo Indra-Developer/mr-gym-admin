@@ -128,7 +128,9 @@ export const Payments: React.FC = () => {
       (member && member.mobileNumber.includes(searchLower)) ||
       (member && member.email && member.email.toLowerCase().includes(searchLower));
 
-    const matchFilter = filter === 'All' || p.status === filter;
+    // "Due" means the member still has an outstanding balance after this payment.
+    // This intentionally includes partial payments, because they still require collection.
+    const matchFilter = filter === 'All' || (filter === 'Due' ? Number(p.balanceDue) > 0 : p.status === filter);
     return matchSearch && matchFilter;
   });
 
@@ -220,8 +222,13 @@ export const Payments: React.FC = () => {
       ) : (
         <>
           {/* --- DESKTOP TABLE --- */}
-          <div className="hidden sm:block bg-white border border-[#E5E7EB] rounded-xl overflow-hidden shadow-sm">
-            <table className="w-full text-left text-sm whitespace-nowrap">
+          <div className="hidden min-w-0 overflow-hidden rounded-xl border border-[#E5E7EB] bg-white shadow-sm sm:block">
+            <div className="flex items-center justify-between border-b border-[#E5E7EB] bg-slate-50/80 px-4 py-2 text-[11px] font-medium text-slate-500">
+              <span>Payment records</span>
+              <span className="inline-flex items-center gap-1">Scroll horizontally for all details <ChevronRight className="h-3.5 w-3.5" /></span>
+            </div>
+            <div className="w-full max-w-full overflow-x-auto overscroll-x-contain pb-2 [scrollbar-color:#94A3B8_#E2E8F0] [scrollbar-width:thin]">
+            <table className="w-full min-w-[1050px] text-left text-sm whitespace-nowrap">
               <thead className="bg-[#F9FAFB] border-b border-[#E5E7EB] text-[#6B7280]">
                 <tr>
                   <th className="px-4 py-3 font-medium">Invoice</th>
@@ -284,6 +291,7 @@ export const Payments: React.FC = () => {
                 })}
               </tbody>
             </table>
+            </div>
             
             {/* Pagination Controls */}
             {totalPages > 1 && (
