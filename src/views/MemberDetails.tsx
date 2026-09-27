@@ -1,410 +1,315 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { ArrowLeft, Edit, MessageCircle, Loader2, AlertTriangle, FileText } from 'lucide-react';
-import { getMember, getWhatsAppLink, updateMember, type Member } from '../services/members';
-import { getPayments, type Payment } from '../services/payments'; // <-- Added to fetch history
+import {
+  Activity,
+  AlertTriangle,
+  ArrowLeft,
+  CalendarClock,
+  CheckCircle2,
+  ChevronRight,
+  CircleDollarSign,
+  CreditCard,
+  Dumbbell,
+  Edit,
+  FileText,
+  History,
+  Loader2,
+  Mail,
+  MessageCircle,
+  PauseCircle,
+  Phone,
+  PlayCircle,
+  RefreshCw,
+  RotateCcw,
+  ShieldCheck,
+  UserRound,
+  X,
+  XCircle,
+} from 'lucide-react';
+import {
+  cancelMembership,
+  freezeMembership,
+  getMember,
+  getWhatsAppLink,
+  reactivateMembership,
+  renewMembership,
+  resumeMembership,
+  type Member,
+  type MembershipActivity,
+} from '../services/members';
+import { getPayments, type Payment } from '../services/payments';
+import { getPlans, type Plan } from '../services/settings';
+
+type Tab = 'Overview' | 'Membership' | 'Payments' | 'Activity';
+type Modal = 'renew' | 'freeze' | 'cancel' | null;
+
+const DAY_MS = 86_400_000;
+
+const money = (value: unknown) => Math.max(0, Number(value) || 0);
+const currency = (value: unknown) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(money(value));
+
+const parseDateOnly = (value: string) => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const formatDateOnly = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+const todayValue = () => formatDateOnly(new Date());
+
+const expiryFromDuration = (startValue: string, duration: string) => {
+  const start = parseDateOnly(startValue);
+  if (!start) return '';
+  const number = Math.max(1, Number.parseInt(duration, 10) || 1);
+  const normalized = duration.toLowerCase();
+  const expiry = new Date(start);
+  if (normalized.includes('year')) expiry.setFullYear(expiry.getFullYear() + number);
+  else if (normalized.includes('week')) expiry.setDate(expiry.getDate() + number * 7);
+  else if (normalized.includes('day')) expiry.setDate(expiry.getDate() + number);
+  else expiry.setMonth(expiry.getMonth() + number);
+  return formatDateOnly(expiry);
+};
+
+const statusStyle = (status: Member['status']) => {
+  if (status === 'Active') return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  if (status === 'Expiring') return 'border-amber-200 bg-amber-50 text-amber-700';
+  if (status === 'Expired') return 'border-red-200 bg-red-50 text-red-700';
+  if (status === 'Frozen') return 'border-cyan-200 bg-cyan-50 text-cyan-700';
+  return 'border-slate-300 bg-slate-100 text-slate-700';
+};
+
+const paymentStyle = (status: Payment['status']) => {
+  if (status === 'Paid') return 'bg-emerald-100 text-emerald-700';
+  if (status === 'Partial') return 'bg-amber-100 text-amber-700';
+  return 'bg-red-100 text-red-700';
+};
 
 export const MemberDetails: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  
   const [member, setMember] = useState<Member | null>(null);
-  const [paymentHistory, setPaymentHistory] = useState<Payment[]>([]); // <-- Store user's payments
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [plans, setPlans] = useState<Plan[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'Overview' | 'Membership' | 'Payments'>('Overview');
-  
-  // Modal States
-  const [showFreezeModal, setShowFreezeModal] = useState(false);
-  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [processing, setProcessing] = useState(false);
-  
-  // Freeze Form Data
-  const [freezeData, setFreezeData] = useState({
-    from: '',
-    until: '',
-    reason: ''
-  });
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [activeTab, setActiveTab] = useState<Tab>('Overview');
+  const [modal, setModal] = useState<Modal>(null);
+  const [freezeData, setFreezeData] = useState({ from: todayValue(), until: '', reason: '' });
+  const [cancelReason, setCancelReason] = useState('');
+  const [renewal, setRenewal] = useState({ planId: '', startDate: todayValue(), expiryDate: '', membershipFee: 0, keepPersonalTraining: true });
 
-  const fetchMemberData = useCallback(async () => {
-    if (id) {
-      const data = await getMember(id);
-      setMember(data);
-
-      // Fetch payment history specific to this member
-      const allPayments = await getPayments();
-      const mPayments = allPayments
-        .filter(p => p.memberId === id)
-        .sort((a, b) => new Date(b.transactionDate).getTime() - new Date(a.transactionDate).getTime());
-      
-      setPaymentHistory(mPayments);
+  const fetchMemberData = useCallback(async (showRefresh = false) => {
+    if (!id) return;
+    if (showRefresh) setRefreshing(true);
+    else setLoading(true);
+    setError('');
+    try {
+      const [memberData, paymentData, planData] = await Promise.all([getMember(id), getPayments(), getPlans()]);
+      setMember(memberData);
+      setPayments(paymentData.filter(payment => payment.memberId === id || payment.membershipId === memberData?.membershipId));
+      setPlans(planData);
+    } catch (loadError) {
+      console.error(loadError);
+      setError('Member details could not be loaded. Please try again.');
+    } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [id]);
 
   useEffect(() => {
-    fetchMemberData();
+    void fetchMemberData();
   }, [fetchMemberData]);
 
-  // --- ACTIONS ---
-  const handleFreeze = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!id || !member) return;
-    if (freezeData.until < freezeData.from) {
-      alert('Freeze Until must be the same as or later than Freeze From.');
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(''), 4500);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  const sortedPayments = useMemo(
+    () => [...payments].sort((a, b) => (parseDateOnly(b.transactionDate)?.getTime() || 0) - (parseDateOnly(a.transactionDate)?.getTime() || 0)),
+    [payments],
+  );
+
+  const openRenewal = () => {
+    if (!member) return;
+    const matchingPlan = plans.find(plan => plan.name === member.planType) || plans[0];
+    const startDate = todayValue();
+    setRenewal({
+      planId: matchingPlan?.id || '',
+      startDate,
+      expiryDate: expiryFromDuration(startDate, matchingPlan?.duration || '1 month'),
+      membershipFee: matchingPlan?.price ?? money(member.membershipFee),
+      keepPersonalTraining: money(member.personalTrainingFee) > 0,
+    });
+    setModal('renew');
+  };
+
+  const updateRenewalPlan = (planId: string) => {
+    const plan = plans.find(item => item.id === planId);
+    setRenewal(current => ({
+      ...current,
+      planId,
+      membershipFee: plan?.price ?? current.membershipFee,
+      expiryDate: expiryFromDuration(current.startDate, plan?.duration || '1 month'),
+    }));
+  };
+
+  const updateRenewalStart = (startDate: string) => {
+    const plan = plans.find(item => item.id === renewal.planId);
+    setRenewal(current => ({ ...current, startDate, expiryDate: expiryFromDuration(startDate, plan?.duration || '1 month') }));
+  };
+
+  const runAction = async (action: () => Promise<void>, successMessage: string) => {
+    setProcessing(true);
+    setError('');
+    try {
+      await action();
+      setModal(null);
+      setNotice(successMessage);
+      await fetchMemberData(true);
+    } catch (actionError) {
+      console.error(actionError);
+      setError(actionError instanceof Error ? actionError.message : 'The action could not be completed.');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const submitFreeze = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (freezeData.until && freezeData.until < freezeData.from) {
+      setError('Expected resume date cannot be earlier than the freeze start date.');
       return;
     }
-    setProcessing(true);
-    try {
-      await updateMember(id, {
-        status: 'Frozen',
-        freezeFrom: freezeData.from,
-        freezeUntil: freezeData.until,
-        freezeReason: freezeData.reason.trim(),
-        frozenAt: new Date().toISOString(),
-      }, null);
-      await fetchMemberData(); // Refresh data
-      setShowFreezeModal(false);
-    } catch {
-      alert("Failed to freeze membership.");
+    await runAction(() => freezeMembership(id, freezeData), 'Membership frozen successfully. It can be resumed at any time.');
+  };
+
+  const submitRenewal = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const selectedPlan = plans.find(plan => plan.id === renewal.planId);
+    if (!selectedPlan || !renewal.expiryDate) {
+      setError('Select a valid membership plan and renewal date.');
+      return;
     }
-    setProcessing(false);
+    await runAction(
+      () => renewMembership(id, { planType: selectedPlan.name, startDate: renewal.startDate, expiryDate: renewal.expiryDate, membershipFee: renewal.membershipFee, keepPersonalTraining: renewal.keepPersonalTraining }),
+      'Membership renewed successfully. A new balance is ready for payment.',
+    );
   };
 
-  const openFreezeModal = () => {
-    setFreezeData({
-      from: member?.freezeFrom || new Date().toISOString().split('T')[0],
-      until: member?.freezeUntil || '',
-      reason: member?.freezeReason || '',
-    });
-    setShowFreezeModal(true);
+  const submitCancellation = async (event: React.FormEvent) => {
+    event.preventDefault();
+    await runAction(() => cancelMembership(id, cancelReason), 'Membership cancelled. You can renew or reactivate this member later.');
   };
 
-  const handleCancel = async () => {
-    if (!id || !member) return;
-    setProcessing(true);
-    try {
-      await updateMember(id, { status: 'Cancelled' }, null);
-      await fetchMemberData(); // Refresh data
-      setShowCancelModal(false);
-    } catch {
-      alert("Failed to cancel membership.");
-    }
-    setProcessing(false);
+  const handleResume = async () => {
+    if (!window.confirm('Resume this membership now? The expiry date will be extended by the actual paused days.')) return;
+    await runAction(() => resumeMembership(id), 'Membership resumed and expiry adjusted successfully.');
   };
 
-  // --- TIMELINE & CALCS ---
-  const getTimelineProgress = () => {
-    if (!member?.startDate || !member?.expiryDate) return 0;
-    const start = new Date(member.startDate).getTime();
-    const end = new Date(member.expiryDate).getTime();
-    const now = new Date().getTime();
-    
-    if (now < start) return 0;
-    if (now > end) return 100;
-    
-    const totalDuration = end - start;
-    const elapsed = now - start;
-    return Math.max(0, Math.min((elapsed / totalDuration) * 100, 100));
+  const handleReactivate = async () => {
+    if (!window.confirm('Reactivate this cancelled membership with its existing expiry date?')) return;
+    await runAction(() => reactivateMembership(id), 'Membership reactivated successfully.');
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'Active': return 'bg-[#16A34A]/10 text-[#16A34A] border-[#16A34A]/20';
-      case 'Expiring': return 'bg-[#D97706]/10 text-[#D97706] border-[#D97706]/20';
-      case 'Expired': return 'bg-[#DC2626]/10 text-[#DC2626] border-[#DC2626]/20';
-      case 'Frozen': return 'bg-[#6B7280]/10 text-[#6B7280] border-[#6B7280]/20';
-      case 'Cancelled': return 'bg-gray-100 text-gray-800 border-gray-200';
-      default: return 'bg-gray-100 text-gray-800 border-gray-200';
-    }
-  };
+  if (loading) return <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3"><Loader2 className="h-9 w-9 animate-spin text-blue-600" /><p className="text-sm font-medium text-slate-500">Loading member profile...</p></div>;
+  if (!member) return <div className="rounded-3xl border border-red-200 bg-white p-10 text-center"><AlertTriangle className="mx-auto h-10 w-10 text-red-500" /><h2 className="mt-3 text-xl font-bold text-slate-900">Member not found</h2><button onClick={() => router.push('/members')} className="mt-5 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white">Back to members</button></div>;
 
-  if (loading) return <div className="flex justify-center py-20"><Loader2 className="w-8 h-8 animate-spin text-[#2563EB]" /></div>;
-  if (!member) return <div className="text-center py-20 text-[#6B7280]">Member not found.</div>;
+  const start = parseDateOnly(member.startDate);
+  const expiry = parseDateOnly(member.expiryDate);
+  const today = parseDateOnly(todayValue())!;
+  const totalDays = start && expiry ? Math.max(1, Math.ceil((expiry.getTime() - start.getTime()) / DAY_MS)) : 1;
+  const elapsedDays = start ? Math.max(0, Math.ceil((today.getTime() - start.getTime()) / DAY_MS)) : 0;
+  const progress = member.status === 'Cancelled' ? 100 : Math.min(100, Math.round((elapsedDays / totalDays) * 100));
+  const remainingDays = expiry ? Math.ceil((expiry.getTime() - today.getTime()) / DAY_MS) : 0;
+  const paidPercent = money(member.totalFee) > 0 ? Math.min(100, Math.round((money(member.amountPaid) / Math.max(1, money(member.totalFee) - money(member.discount))) * 100)) : 0;
+  const fallbackHistory: MembershipActivity[] = [{ id: 'created', type: 'Created', title: 'Member profile created', details: `Membership started on ${member.startDate}.`, occurredAt: typeof member.createdAt === 'object' && member.createdAt && 'toDate' in member.createdAt ? (member.createdAt as { toDate: () => Date }).toDate().toISOString() : member.startDate }];
+  const history = [...(member.membershipHistory || []), ...fallbackHistory].sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt));
+  const selectedRenewalPlan = plans.find(plan => plan.id === renewal.planId);
+  const renewalTotal = renewal.membershipFee + (renewal.keepPersonalTraining ? money(member.personalTrainingFee) : 0);
 
-  // Real-time calculation: Total Paid is always (Fee - Discount - Balance Due)
-  const actualAmountPaid = (member.totalFee || 0) - (member.discount || 0) - (member.balanceDue || 0);
+  const tabs: Array<{ name: Tab; icon: typeof Activity }> = [
+    { name: 'Overview', icon: UserRound },
+    { name: 'Membership', icon: ShieldCheck },
+    { name: 'Payments', icon: CreditCard },
+    { name: 'Activity', icon: History },
+  ];
 
   return (
-    <div className="max-w-5xl mx-auto space-y-4 sm:space-y-6 pb-24 sm:pb-8">
-      
-      {/* Header Profile Card */}
-      <div className="bg-white p-5 sm:p-6 rounded-xl border border-[#E5E7EB] shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <div className="flex items-start sm:items-center gap-3 sm:gap-4 w-full sm:w-auto min-w-0">
-          <button onClick={() => router.push('/members')} aria-label="Back to members" className="flex shrink-0 p-2 -ml-2 rounded-full hover:bg-gray-100 text-[#6B7280]"><ArrowLeft className="w-5 h-5" /></button>
-          
-          {member.profilePicUrl ? (
-            <img src={member.profilePicUrl} alt={member.fullName} className="h-16 w-16 sm:h-20 sm:w-20 rounded-full object-cover border border-gray-200 shadow-sm" />
-          ) : (
-            <div className="h-16 w-16 sm:h-20 sm:w-20 rounded-full bg-[#2563EB] text-white flex items-center justify-center font-bold text-2xl shadow-sm">
-              {member.fullName.substring(0, 2).toUpperCase()}
-            </div>
-          )}
-          
-          <div className="min-w-0 flex-1">
-            <h1 className="text-xl sm:text-2xl font-bold text-[#1F2937] leading-tight break-words">{member.fullName}</h1>
-            <p className="text-sm text-[#4B5563]">ID: {member.membershipId}</p>
-            <div className="flex flex-wrap items-center gap-2 mt-1.5">
-              <span className={`px-2.5 py-0.5 text-xs font-medium border rounded-md ${getStatusColor(member.status)}`}>{member.status}</span>
-              <span className="text-sm text-[#6B7280]">Mobile: +91 {member.mobileNumber}</span>
-            </div>
-          </div>
-        </div>
+    <div className="space-y-5 pb-8">
+      {notice ? <div className="fixed right-4 top-20 z-50 flex max-w-sm items-start gap-3 rounded-2xl border border-emerald-200 bg-white p-4 text-sm font-semibold text-emerald-800 shadow-2xl"><CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-600" />{notice}</div> : null}
 
-        <div className="flex w-full sm:w-auto flex-col gap-2">
-          <button onClick={() => router.push(`/members/edit/${id}`)} className="flex items-center justify-center gap-2 px-4 py-2 bg-[#2563EB] text-white rounded-lg text-sm font-medium hover:bg-[#1D4ED8] transition-colors shadow-sm">
-            <Edit className="w-4 h-4" /> Edit Profile
-          </button>
-          <a href={getWhatsAppLink(member)} target="_blank" rel="noreferrer" className="flex items-center justify-center gap-2 px-4 py-2 bg-[#25D366] text-white rounded-lg text-sm font-medium hover:bg-[#20bd5a] transition-colors shadow-sm">
-            <MessageCircle className="w-4 h-4" /> WhatsApp
-          </a>
-        </div>
+      <div className="flex items-center justify-between gap-3">
+        <button onClick={() => router.push('/members')} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-600 shadow-sm transition hover:-translate-x-0.5 hover:text-blue-700"><ArrowLeft className="h-4 w-4" /> Members</button>
+        <button onClick={() => void fetchMemberData(true)} disabled={refreshing} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-600 shadow-sm hover:bg-slate-50 disabled:opacity-60"><RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} /> Refresh</button>
       </div>
 
-      {/* Interactive Tabs */}
-      <div className="border-b border-[#E5E7EB]">
-        <div className="flex gap-6 overflow-x-auto hide-scrollbar">
-          {['Overview', 'Membership', 'Payments'].map((tab) => (
-            <button 
-              key={tab}
-              onClick={() => setActiveTab(tab as any)}
-              className={`pb-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap ${activeTab === tab ? 'border-[#2563EB] text-[#2563EB] font-semibold' : 'border-transparent text-[#6B7280] hover:text-[#1F2937]'}`}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
-      </div>
+      {error ? <div className="flex items-start justify-between gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-700"><span className="flex gap-2"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{error}</span><button onClick={() => setError('')} aria-label="Dismiss error"><X className="h-4 w-4" /></button></div> : null}
 
-      {/* Action Buttons Row */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
-        <button onClick={() => router.push('/payments/record')} className="px-4 py-2.5 bg-[#2563EB] text-white rounded-lg text-sm font-medium hover:bg-[#1D4ED8] shadow-sm transition-colors">₹ Record Payment</button>
-        <button onClick={() => router.push(`/members/edit/${id}`)} className="px-4 py-2.5 bg-[#2563EB] text-white rounded-lg text-sm font-medium hover:bg-[#1D4ED8] shadow-sm transition-colors">↺ Renew Membership</button>
-        <button onClick={openFreezeModal} disabled={member.status === 'Frozen' || member.status === 'Cancelled'} className="px-4 py-2.5 bg-[#D97706] text-white rounded-lg text-sm font-medium hover:bg-[#B45309] shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors">⏸ Freeze Membership</button>
-        <button onClick={() => setShowCancelModal(true)} disabled={member.status === 'Cancelled'} className="px-4 py-2.5 bg-[#DC2626] text-white rounded-lg text-sm font-medium hover:bg-[#B91C1C] shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors">× Cancel Membership</button>
-      </div>
-
-      {/* Tab Content Rendering */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
-        
-        {/* Contact Info */}
-        {activeTab === 'Overview' && (
-          <div className="bg-white p-5 rounded-xl border border-[#E5E7EB] shadow-sm h-fit">
-            <h3 className="font-bold text-[#1F2937] mb-4 text-lg">Contact Information</h3>
-            <div className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-x-3 gap-y-3 text-sm">
-              <div className="text-[#6B7280]">Full Name</div><div className="font-medium text-[#1F2937] text-right">{member.fullName}</div>
-              <div className="text-[#6B7280]">DOB</div><div className="font-medium text-[#1F2937] text-right">{member.dateOfBirth || '-'}</div>
-              <div className="text-[#6B7280]">Mobile</div><div className="font-medium text-[#1F2937] text-right">+91 {member.mobileNumber}</div>
-              <div className="text-[#6B7280]">Email</div><div className="font-medium text-[#1F2937] text-right break-all">{member.email || '-'}</div>
-            </div>
+      <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-slate-950 via-blue-950 to-blue-700 p-5 text-white shadow-xl sm:p-7">
+        <div className="pointer-events-none absolute -right-20 -top-20 h-60 w-60 rounded-full bg-cyan-400/20 blur-3xl" />
+        <div className="relative flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 flex-col items-center gap-4 text-center sm:flex-row sm:text-left">
+            {member.profilePicUrl ? <img src={member.profilePicUrl} alt={member.fullName} className="h-24 w-24 shrink-0 rounded-3xl border-4 border-white/20 object-cover shadow-2xl" /> : <div className="flex h-24 w-24 shrink-0 items-center justify-center rounded-3xl border-4 border-white/20 bg-white/10 text-3xl font-black shadow-2xl">{member.fullName.charAt(0).toUpperCase()}</div>}
+            <div className="min-w-0"><div className="flex flex-wrap items-center justify-center gap-2 sm:justify-start"><span className={`rounded-full border px-3 py-1 text-xs font-black ${statusStyle(member.status)}`}>{member.status}</span>{money(member.personalTrainingFee) > 0 ? <span className="inline-flex items-center gap-1 rounded-full border border-violet-300/30 bg-violet-400/15 px-3 py-1 text-xs font-bold text-violet-100"><Dumbbell className="h-3.5 w-3.5" /> Personal Training</span> : null}</div><h1 className="mt-3 truncate text-2xl font-black tracking-tight sm:text-3xl">{member.fullName}</h1><p className="mt-1 text-sm font-medium text-blue-200">{member.membershipId} · {member.planType} · {member.accessShift}</p><div className="mt-3 flex flex-wrap justify-center gap-3 text-xs text-blue-100 sm:justify-start">{member.mobileNumber ? <span className="inline-flex items-center gap-1.5"><Phone className="h-3.5 w-3.5" />{member.mobileNumber}</span> : null}{member.email ? <span className="inline-flex items-center gap-1.5"><Mail className="h-3.5 w-3.5" />{member.email}</span> : null}</div></div>
           </div>
-        )}
-
-        {/* Membership Info */}
-        {(activeTab === 'Overview' || activeTab === 'Membership') && (
-          <div className="bg-white p-5 rounded-xl border border-[#E5E7EB] shadow-sm h-fit">
-            <h3 className="font-bold text-[#1F2937] mb-4 text-lg">Membership Information</h3>
-            <div className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)] gap-x-3 gap-y-3 text-sm">
-              <div className="text-[#6B7280]">Plan Type</div><div className="font-medium text-[#1F2937] text-right">{member.planType}</div>
-              <div className="text-[#6B7280]">Shift</div><div className="font-medium text-[#1F2937] text-right">{member.accessShift}</div>
-              <div className="text-[#6B7280]">Start Date</div><div className="font-medium text-[#1F2937] text-right">{member.startDate}</div>
-              <div className="text-[#6B7280]">Expiry Date</div><div className="font-medium text-[#1F2937] text-right">{member.expiryDate}</div>
-              {(member.personalTrainingFee || 0) > 0 && (
-                <>
-                  <div className="text-[#6B7280]">Personal Training</div><div className="font-medium text-cyan-800 text-right">{member.personalTrainingPlanName || 'Personal Training'}</div>
-                  <div className="text-[#6B7280]">Training Duration</div><div className="font-medium text-[#1F2937] text-right">{member.personalTrainingPlanDuration || '-'}</div>
-                </>
-              )}
-              {member.status === 'Frozen' && (
-                <>
-                  <div className="text-[#6B7280]">Freeze Period</div><div className="font-medium text-[#D97706] text-right">{member.freezeFrom || '-'} to {member.freezeUntil || '-'}</div>
-                  <div className="text-[#6B7280]">Freeze Reason</div><div className="font-medium text-[#1F2937] text-right">{member.freezeReason || '-'}</div>
-                </>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Payment Summary */}
-        {(activeTab === 'Overview' || activeTab === 'Payments') && (
-          <div className="bg-white p-5 rounded-xl border border-[#E5E7EB] shadow-sm h-fit">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="font-bold text-[#1F2937] text-lg">Payment Summary</h3>
-              {member.balanceDue === 0 && <span className="px-2 py-0.5 text-xs font-medium bg-[#16A34A]/10 text-[#16A34A] rounded-md">Paid in Full</span>}
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
-              <div className="space-y-3 text-sm">
-                <div className="flex justify-between gap-3"><span className="text-[#6B7280]">Membership Fee</span><span className="font-medium">₹{member.membershipFee ?? Math.max(0, member.totalFee - (member.personalTrainingFee || 0))}</span></div>
-                {(member.personalTrainingFee || 0) > 0 && <div className="flex justify-between gap-3"><span className="text-cyan-700">Personal Training</span><span className="font-medium text-cyan-800">₹{member.personalTrainingFee}</span></div>}
-                <div className="flex justify-between"><span className="text-[#6B7280]">Total Fee</span><span className="font-medium">₹{member.totalFee}</span></div>
-                <div className="flex justify-between"><span className="text-[#6B7280]">Discount</span><span className="font-medium">₹{member.discount}</span></div>
-              </div>
-              <div className="space-y-3 text-sm border-t sm:border-t-0 sm:border-l border-[#F3F4F6] pt-4 sm:pt-0 sm:pl-6">
-                {/* Dynamically calculated amount paid */}
-                <div className="flex justify-between"><span className="text-[#6B7280]">Amount Paid</span><span className="font-medium text-[#16A34A]">₹{actualAmountPaid}</span></div>
-                <div className="flex justify-between"><span className="text-[#6B7280]">Balance Due</span><span className={`font-bold ${member.balanceDue > 0 ? 'text-[#DC2626]' : 'text-[#16A34A]'}`}>₹{member.balanceDue}</span></div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Membership Timeline */}
-        {(activeTab === 'Overview' || activeTab === 'Membership') && (
-          <div className="bg-white p-5 rounded-xl border border-[#E5E7EB] shadow-sm h-fit">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="font-bold text-[#1F2937] text-lg">Membership Timeline</h3>
-              <span className={`px-2 py-0.5 text-xs font-medium border rounded-md ${getStatusColor(member.status)}`}>{member.status}</span>
-            </div>
-            <div className="relative pt-6 pb-2">
-              <div className="overflow-hidden h-2 mb-4 text-xs flex rounded bg-[#E5E7EB]">
-                <div style={{ width: `${getTimelineProgress()}%` }} className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-[#16A34A] transition-all duration-500"></div>
-              </div>
-              <div className="grid grid-cols-3 gap-2 text-[11px] sm:text-xs font-medium text-[#6B7280]">
-                <div>Join Date<br/>{member.startDate}</div>
-                <div className="text-center text-[#1F2937]">Current Progress<br/>{Math.round(getTimelineProgress())}%</div>
-                <div className="text-right">Expiry Date<br/>{member.expiryDate}</div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* PAYMENT HISTORY LIST (Only visible on Payments Tab) */}
-        {activeTab === 'Payments' && (
-          <div className="bg-white p-5 rounded-xl border border-[#E5E7EB] shadow-sm h-fit lg:col-span-2">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="font-bold text-[#1F2937] text-lg">Payment History</h3>
-            </div>
-            
-            {paymentHistory.length > 0 ? (
-              <>
-                <div className="hidden sm:block overflow-x-auto">
-                  <table className="w-full text-left text-sm whitespace-nowrap">
-                    <thead className="bg-[#F9FAFB] border-y border-[#E5E7EB]">
-                      <tr>
-                        <th className="py-3 px-4 font-semibold text-[#6B7280]">Invoice Number</th>
-                        <th className="py-3 px-4 font-semibold text-[#6B7280]">Date & Mode</th>
-                        <th className="py-3 px-4 font-semibold text-[#6B7280]">Amount</th>
-                        <th className="py-3 px-4 font-semibold text-[#6B7280] text-right">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#E5E7EB]">
-                      {paymentHistory.map(p => (
-                        <tr key={p.id} className="hover:bg-[#F9FAFB]">
-                          <td className="py-3 px-4 font-medium text-[#1F2937]">{p.invoiceNumber}</td>
-                          <td className="py-3 px-4 text-[#4B5563]"><div>{p.transactionDate}</div><div className="text-xs text-[#9CA3AF]">{p.paymentMode}</div></td>
-                          <td className="py-3 px-4 font-semibold text-[#16A34A]">₹{p.amountPaid}</td>
-                          <td className="py-3 px-4 text-right">
-                            <button onClick={() => router.push(`/payments/invoice/${p.id}`)} className="text-[#2563EB] hover:underline font-medium text-xs flex items-center justify-end gap-1 ml-auto">
-                              <FileText className="h-3 w-3" /> View Invoice
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Mobile History Cards */}
-                <div className="sm:hidden space-y-3">
-                  {paymentHistory.map(p => (
-                    <div key={p.id} className="border border-[#E5E7EB] rounded-lg p-3 flex justify-between items-center shadow-sm">
-                      <div>
-                        <p className="font-semibold text-[#1F2937] text-sm">{p.invoiceNumber}</p>
-                        <p className="text-xs text-[#6B7280] mt-0.5">{p.transactionDate} • {p.paymentMode}</p>
-                      </div>
-                      <div className="flex flex-col items-end gap-1">
-                        <span className="font-bold text-[#16A34A] text-sm">₹{p.amountPaid}</span>
-                        <button onClick={() => router.push(`/payments/invoice/${p.id}`)} className="text-xs text-[#2563EB] font-medium flex items-center gap-1">
-                          <FileText className="h-3 w-3" /> View
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="text-center py-6 text-[#6B7280] bg-gray-50 rounded-lg border border-dashed border-gray-200 text-sm">
-                No individual transactions recorded for this member yet.
-              </div>
-            )}
-          </div>
-        )}
-
-      </div>
-
-      {/* --- MODALS --- */}
-
-      {/* Freeze Modal */}
-      {showFreezeModal && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <form onSubmit={handleFreeze} className="bg-white rounded-xl max-w-md w-full p-4 sm:p-6 shadow-xl relative max-h-[calc(100dvh-1.5rem)] overflow-y-auto">
-            <h3 className="text-xl font-bold text-[#1F2937] mb-4">Freeze Membership</h3>
-            
-            <div className="mb-4 text-sm text-[#4B5563]">
-              <p>Member: <span className="font-medium text-[#1F2937]">{member.fullName}</span></p>
-              <p>Membership ID: <span className="font-medium text-[#1F2937]">{member.membershipId}</span></p>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-              <div>
-                <label className="block text-xs font-medium text-[#1F2937] mb-1">Freeze From</label>
-                <input type="date" required value={freezeData.from} onChange={e => setFreezeData({...freezeData, from: e.target.value})} className="w-full h-10 px-3 rounded-lg border border-[#E5E7EB] text-sm outline-none focus:border-[#D97706]" />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-[#1F2937] mb-1">Freeze Until</label>
-                <input type="date" required value={freezeData.until} onChange={e => setFreezeData({...freezeData, until: e.target.value})} className="w-full h-10 px-3 rounded-lg border border-[#E5E7EB] text-sm outline-none focus:border-[#D97706]" />
-              </div>
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-xs font-medium text-[#1F2937] mb-1">Reason</label>
-              <textarea rows={3} required value={freezeData.reason} onChange={e => setFreezeData({...freezeData, reason: e.target.value})} className="w-full p-3 rounded-lg border border-[#E5E7EB] text-sm outline-none focus:border-[#D97706]"></textarea>
-            </div>
-
-            <p className="text-xs text-[#6B7280] mb-6">
-              Freezing your membership will pause access and billing for the selected duration. A reactivation fee may apply. Please review our policy.
-            </p>
-
-            <div className="flex flex-col-reverse sm:flex-row gap-3 justify-end">
-              <button type="button" onClick={() => setShowFreezeModal(false)} className="px-4 py-2 text-sm rounded-lg font-medium text-[#6B7280] border border-[#E5E7EB] hover:bg-gray-50">Cancel</button>
-              <button type="submit" disabled={processing} className="px-4 py-2 text-sm bg-[#D97706] text-white rounded-lg font-medium hover:bg-[#B45309] flex items-center">
-                {processing ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null} Freeze Membership
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* Cancel Modal */}
-      {showCancelModal && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <div className="bg-white rounded-xl max-w-md w-full p-4 sm:p-6 shadow-xl relative text-center sm:text-left max-h-[calc(100dvh-1.5rem)] overflow-y-auto">
-            
-            <div className="flex items-center justify-center sm:justify-start gap-3 mb-4">
-              <AlertTriangle className="h-6 w-6 text-[#DC2626]" />
-              <h3 className="text-xl font-bold text-[#1F2937]">Cancel Membership?</h3>
-            </div>
-            
-            <div className="mb-4 text-sm text-[#4B5563]">
-              <p>Member: <span className="font-medium text-[#1F2937]">{member.fullName}</span></p>
-              <p>Membership ID: <span className="font-medium text-[#1F2937]">{member.membershipId}</span></p>
-            </div>
-
-            <p className="text-sm text-[#4B5563] mb-6">
-              Are you sure you want to cancel this membership? This action is destructive and will immediately change the membership status to Cancelled. Access and billing will cease.
-            </p>
-
-            <div className="flex flex-col sm:flex-row gap-3 justify-end">
-              <button type="button" onClick={() => setShowCancelModal(false)} className="px-4 py-2 text-sm rounded-lg font-medium text-[#6B7280] border border-[#E5E7EB] hover:bg-gray-50">Keep Membership</button>
-              <button type="button" onClick={handleCancel} disabled={processing} className="px-4 py-2 text-sm bg-[#DC2626] text-white rounded-lg font-medium hover:bg-[#B91C1C] flex justify-center items-center">
-                {processing ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null} Cancel Membership
-              </button>
-            </div>
+          <div className="grid w-full grid-cols-2 gap-2 sm:grid-cols-4 lg:w-auto lg:grid-cols-2">
+            <button onClick={() => router.push(`/members/edit/${id}`)} className="flex min-h-12 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/10 px-3 text-sm font-bold backdrop-blur transition hover:bg-white/20"><Edit className="h-4 w-4" /> Edit</button>
+            <a href={getWhatsAppLink(member)} target="_blank" rel="noreferrer" className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-emerald-500 px-3 text-sm font-bold text-white transition hover:bg-emerald-400"><MessageCircle className="h-4 w-4" /> WhatsApp</a>
+            <button onClick={() => router.push('/payments/record')} className="col-span-2 flex min-h-12 items-center justify-center gap-2 rounded-xl bg-white px-4 text-sm font-black text-blue-700 shadow-lg transition hover:bg-blue-50"><CircleDollarSign className="h-5 w-5" /> Record Payment</button>
           </div>
         </div>
-      )}
+      </section>
 
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><p className="text-xs font-bold uppercase tracking-wide text-slate-400">Total Fee</p><p className="mt-2 text-xl font-black text-slate-900 sm:text-2xl">{currency(member.totalFee)}</p><p className="mt-1 text-xs text-slate-500">Discount {currency(member.discount)}</p></div>
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4 shadow-sm"><p className="text-xs font-bold uppercase tracking-wide text-emerald-600">Amount Paid</p><p className="mt-2 text-xl font-black text-emerald-800 sm:text-2xl">{currency(member.amountPaid)}</p><p className="mt-1 text-xs text-emerald-600">{paidPercent}% collected</p></div>
+        <div className="rounded-2xl border border-rose-200 bg-rose-50/60 p-4 shadow-sm"><p className="text-xs font-bold uppercase tracking-wide text-rose-600">Balance Due</p><p className="mt-2 text-xl font-black text-rose-800 sm:text-2xl">{currency(member.balanceDue)}</p><p className="mt-1 text-xs text-rose-600">Pending collection</p></div>
+        <div className="rounded-2xl border border-blue-200 bg-blue-50/60 p-4 shadow-sm"><p className="text-xs font-bold uppercase tracking-wide text-blue-600">Days Remaining</p><p className="mt-2 text-xl font-black text-blue-900 sm:text-2xl">{member.status === 'Cancelled' ? '—' : Math.max(0, remainingDays)}</p><p className="mt-1 text-xs text-blue-600">Expires {member.expiryDate}</p></div>
+      </section>
+
+      {member.status === 'Frozen' ? <div className="flex flex-col gap-4 rounded-3xl border border-cyan-200 bg-cyan-50 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex gap-3"><PauseCircle className="h-7 w-7 shrink-0 text-cyan-700" /><div><h2 className="font-black text-cyan-900">Membership is currently frozen</h2><p className="mt-1 text-sm text-cyan-800">From {member.freezeFrom || '—'}{member.freezeUntil ? ` · expected until ${member.freezeUntil}` : ''}</p><p className="mt-1 text-xs text-cyan-700">{member.freezeReason || 'No reason recorded'}</p></div></div><button onClick={handleResume} disabled={processing} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-cyan-700 px-5 text-sm font-black text-white hover:bg-cyan-800 disabled:opacity-60"><PlayCircle className="h-5 w-5" /> Resume Now</button></div> : null}
+      {member.status === 'Cancelled' ? <div className="flex flex-col gap-4 rounded-3xl border border-slate-300 bg-slate-100 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex gap-3"><XCircle className="h-7 w-7 shrink-0 text-slate-700" /><div><h2 className="font-black text-slate-900">Membership was cancelled</h2><p className="mt-1 text-sm text-slate-700">{member.cancellationReason || 'No cancellation reason recorded.'}</p><p className="mt-1 text-xs text-slate-500">Renew with new dates, or reactivate the remaining existing period.</p></div></div><div className="flex gap-2"><button onClick={handleReactivate} disabled={processing || remainingDays < 0} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-sm font-black text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"><RotateCcw className="h-4 w-4" /> Reactivate</button><button onClick={openRenewal} className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-black text-white hover:bg-blue-700"><RefreshCw className="h-4 w-4" /> Renew</button></div></div> : null}
+
+      <section className="rounded-3xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex gap-1 overflow-x-auto border-b border-slate-200 p-2">
+          {tabs.map(tab => <button key={tab.name} onClick={() => setActiveTab(tab.name)} className={`inline-flex min-w-max items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition ${activeTab === tab.name ? 'bg-blue-600 text-white shadow-md' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900'}`}><tab.icon className="h-4 w-4" />{tab.name}{tab.name === 'Payments' ? <span className={`rounded-full px-1.5 text-[10px] ${activeTab === tab.name ? 'bg-white/20' : 'bg-slate-200'}`}>{payments.length}</span> : null}</button>)}
+        </div>
+
+        <div className="p-4 sm:p-6">
+          {activeTab === 'Overview' ? <div className="grid gap-5 lg:grid-cols-2"><div className="rounded-2xl border border-slate-200 p-5"><h3 className="flex items-center gap-2 font-black text-slate-900"><UserRound className="h-5 w-5 text-blue-600" /> Personal information</h3><dl className="mt-5 grid grid-cols-1 gap-4 text-sm sm:grid-cols-2"><div><dt className="text-xs font-semibold text-slate-400">Full Name</dt><dd className="mt-1 font-bold text-slate-800">{member.fullName}</dd></div><div><dt className="text-xs font-semibold text-slate-400">Gender</dt><dd className="mt-1 font-bold text-slate-800">{member.gender || '—'}</dd></div><div><dt className="text-xs font-semibold text-slate-400">Date of Birth</dt><dd className="mt-1 font-bold text-slate-800">{member.dateOfBirth || '—'}</dd></div><div><dt className="text-xs font-semibold text-slate-400">Access Shift</dt><dd className="mt-1 font-bold text-slate-800">{member.accessShift || '—'}</dd></div><div><dt className="text-xs font-semibold text-slate-400">Mobile Number</dt><dd className="mt-1 break-all font-bold text-slate-800">{member.mobileNumber || '—'}</dd></div><div><dt className="text-xs font-semibold text-slate-400">Email Address</dt><dd className="mt-1 break-all font-bold text-slate-800">{member.email || '—'}</dd></div></dl></div><div className="rounded-2xl border border-slate-200 p-5"><h3 className="flex items-center gap-2 font-black text-slate-900"><CalendarClock className="h-5 w-5 text-blue-600" /> Membership progress</h3><div className="mt-5 flex items-end justify-between"><div><p className="text-xs font-semibold text-slate-400">Current period</p><p className="mt-1 text-sm font-bold text-slate-800">{member.startDate} → {member.expiryDate}</p></div><span className="text-lg font-black text-blue-700">{progress}%</span></div><div className="mt-3 h-3 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${member.status === 'Cancelled' ? 'bg-slate-500' : member.status === 'Frozen' ? 'bg-cyan-500' : 'bg-gradient-to-r from-blue-600 to-cyan-400'}`} style={{ width: `${progress}%` }} /></div><div className="mt-6 grid grid-cols-2 gap-3"><div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">Renewals</p><p className="mt-1 text-xl font-black text-slate-900">{member.renewalCount || 0}</p></div><div className="rounded-xl bg-violet-50 p-3"><p className="text-xs text-violet-600">Personal Training</p><p className="mt-1 truncate text-sm font-black text-violet-900">{member.personalTrainingPlanName || 'Not selected'}</p></div></div></div></div> : null}
+
+          {activeTab === 'Membership' ? <div className="space-y-5"><div className="flex flex-col gap-3 rounded-2xl border border-blue-200 bg-blue-50 p-5 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-bold uppercase tracking-wide text-blue-600">Membership controls</p><h3 className="mt-1 text-lg font-black text-blue-950">Manage the complete membership lifecycle</h3></div><div className="flex flex-wrap gap-2"><button onClick={openRenewal} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white"><RefreshCw className="h-4 w-4" /> {member.status === 'Cancelled' ? 'Renew & Reactivate' : 'Renew Membership'}</button>{member.status === 'Frozen' ? <button onClick={handleResume} className="inline-flex items-center gap-2 rounded-xl bg-cyan-700 px-4 py-2.5 text-sm font-bold text-white"><PlayCircle className="h-4 w-4" /> Resume</button> : member.status !== 'Cancelled' ? <button onClick={() => { setFreezeData({ from: todayValue(), until: '', reason: '' }); setModal('freeze'); }} className="inline-flex items-center gap-2 rounded-xl bg-amber-600 px-4 py-2.5 text-sm font-bold text-white"><PauseCircle className="h-4 w-4" /> Freeze</button> : null}{member.status !== 'Cancelled' ? <button onClick={() => setModal('cancel')} className="inline-flex items-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-bold text-white"><XCircle className="h-4 w-4" /> Cancel</button> : null}</div></div><div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{[{ label: 'Membership Plan', value: member.planType }, { label: 'Access Shift', value: member.accessShift }, { label: 'Start Date', value: member.startDate }, { label: 'Expiry Date', value: member.expiryDate }, { label: 'Membership Fee', value: currency(member.membershipFee) }, { label: 'Personal Training Fee', value: currency(member.personalTrainingFee) }].map(item => <div key={item.label} className="rounded-2xl border border-slate-200 bg-white p-4"><p className="text-xs font-semibold text-slate-400">{item.label}</p><p className="mt-2 font-black text-slate-900">{item.value || '—'}</p></div>)}</div></div> : null}
+
+          {activeTab === 'Payments' ? <div><div className="mb-4 flex items-center justify-between"><div><h3 className="font-black text-slate-900">Payment history</h3><p className="text-xs text-slate-500">Every invoice recorded for this member</p></div><button onClick={() => router.push('/payments/record')} className="rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white">Record payment</button></div><div className="space-y-3">{sortedPayments.length ? sortedPayments.map(payment => <button key={payment.id} onClick={() => router.push(`/payments/invoice/${payment.id}`)} className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 p-4 text-left transition hover:border-blue-200 hover:bg-blue-50/30"><span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700"><FileText className="h-5 w-5" /></span><span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="truncate text-sm font-black text-slate-900">{payment.invoiceNumber}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${paymentStyle(payment.status)}`}>{payment.status}</span></span><span className="mt-1 block truncate text-xs text-slate-500">{payment.transactionDate} · {payment.paymentMode}</span></span><span className="shrink-0 text-right"><span className="block font-black text-slate-900">{currency(payment.amountPaid)}</span><span className="mt-1 block text-[10px] text-rose-600">Due {currency(payment.balanceDue)}</span></span><ChevronRight className="h-4 w-4 shrink-0 text-slate-300" /></button>) : <div className="rounded-2xl border border-dashed border-slate-300 p-10 text-center"><CreditCard className="mx-auto h-9 w-9 text-slate-300" /><p className="mt-3 text-sm font-bold text-slate-700">No payments recorded</p></div>}</div></div> : null}
+
+          {activeTab === 'Activity' ? <div><h3 className="font-black text-slate-900">Membership activity</h3><p className="mt-1 text-xs text-slate-500">Renewals, freezes, resumes, cancellations and reactivations</p><div className="relative mt-6 space-y-5 before:absolute before:bottom-3 before:left-[17px] before:top-3 before:w-px before:bg-slate-200">{history.map(event => <div key={event.id} className="relative flex gap-4"><span className="z-10 flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-4 border-white bg-blue-600 text-white shadow"><Activity className="h-4 w-4" /></span><div className="min-w-0 flex-1 rounded-2xl border border-slate-200 p-4"><div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between"><p className="font-black text-slate-900">{event.title}</p><time className="text-xs text-slate-400">{new Date(event.occurredAt).toLocaleString('en-IN')}</time></div><p className="mt-2 text-sm leading-6 text-slate-600">{event.details}</p></div></div>)}</div></div> : null}
+        </div>
+      </section>
+
+      <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+        <button onClick={openRenewal} className="flex min-h-20 flex-col items-center justify-center gap-2 rounded-2xl bg-blue-600 p-3 text-center text-xs font-black text-white shadow-lg transition hover:-translate-y-0.5"><RefreshCw className="h-5 w-5" />{member.status === 'Cancelled' ? 'Renew & Reactivate' : 'Renew Membership'}</button>
+        {member.status === 'Frozen' ? <button onClick={handleResume} className="flex min-h-20 flex-col items-center justify-center gap-2 rounded-2xl bg-cyan-700 p-3 text-center text-xs font-black text-white shadow-lg"><PlayCircle className="h-5 w-5" />Resume Membership</button> : <button onClick={() => { setFreezeData({ from: todayValue(), until: '', reason: '' }); setModal('freeze'); }} disabled={member.status === 'Cancelled'} className="flex min-h-20 flex-col items-center justify-center gap-2 rounded-2xl bg-amber-600 p-3 text-center text-xs font-black text-white shadow-lg disabled:cursor-not-allowed disabled:opacity-40"><PauseCircle className="h-5 w-5" />Freeze Membership</button>}
+        {member.status === 'Cancelled' ? <button onClick={handleReactivate} disabled={remainingDays < 0} className="flex min-h-20 flex-col items-center justify-center gap-2 rounded-2xl bg-slate-700 p-3 text-center text-xs font-black text-white shadow-lg disabled:opacity-40"><RotateCcw className="h-5 w-5" />Reactivate</button> : <button onClick={() => setModal('cancel')} className="flex min-h-20 flex-col items-center justify-center gap-2 rounded-2xl bg-red-600 p-3 text-center text-xs font-black text-white shadow-lg"><XCircle className="h-5 w-5" />Cancel Membership</button>}
+        <button onClick={() => router.push(`/members/edit/${id}`)} className="flex min-h-20 flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-3 text-center text-xs font-black text-slate-700 shadow-sm"><Edit className="h-5 w-5 text-blue-600" />Edit Details</button>
+        <button onClick={() => router.push('/payments/record')} className="col-span-2 flex min-h-20 flex-col items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white p-3 text-center text-xs font-black text-slate-700 shadow-sm sm:col-span-1"><CircleDollarSign className="h-5 w-5 text-emerald-600" />Record Payment</button>
+      </section>
+
+      {modal === 'freeze' ? <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/65 p-0 backdrop-blur-sm sm:items-center sm:p-4"><form onSubmit={submitFreeze} className="max-h-[92vh] w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-2xl sm:max-w-md sm:rounded-3xl sm:p-6"><div className="flex items-start justify-between"><div><h2 className="text-xl font-black text-slate-900">Freeze membership</h2><p className="mt-1 text-sm text-slate-500">The member can be resumed before the expected date.</p></div><button type="button" onClick={() => setModal(null)} className="rounded-xl bg-slate-100 p-2"><X className="h-5 w-5" /></button></div><div className="mt-6 space-y-4"><label className="block"><span className="text-xs font-bold text-slate-600">Freeze from *</span><input type="date" required value={freezeData.from} onChange={event => setFreezeData(current => ({ ...current, from: event.target.value }))} className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 outline-none focus:border-amber-500" /></label><label className="block"><span className="text-xs font-bold text-slate-600">Expected resume date (optional)</span><input type="date" min={freezeData.from} value={freezeData.until} onChange={event => setFreezeData(current => ({ ...current, until: event.target.value }))} className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 outline-none focus:border-amber-500" /></label><label className="block"><span className="text-xs font-bold text-slate-600">Reason *</span><textarea required rows={4} value={freezeData.reason} onChange={event => setFreezeData(current => ({ ...current, reason: event.target.value }))} placeholder="Medical leave, travel, temporary break..." className="mt-1.5 w-full rounded-xl border border-slate-200 p-3 outline-none focus:border-amber-500" /></label><div className="rounded-xl bg-cyan-50 p-3 text-xs leading-5 text-cyan-800">When resumed, the expiry date is automatically extended by the actual number of paused days.</div></div><div className="mt-6 grid grid-cols-2 gap-3"><button type="button" onClick={() => setModal(null)} className="h-11 rounded-xl border border-slate-200 font-bold text-slate-600">Close</button><button type="submit" disabled={processing} className="flex h-11 items-center justify-center gap-2 rounded-xl bg-amber-600 font-bold text-white disabled:opacity-60">{processing ? <Loader2 className="h-4 w-4 animate-spin" /> : <PauseCircle className="h-4 w-4" />} Freeze</button></div></form></div> : null}
+
+      {modal === 'cancel' ? <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/65 p-0 backdrop-blur-sm sm:items-center sm:p-4"><form onSubmit={submitCancellation} className="w-full rounded-t-3xl bg-white p-5 shadow-2xl sm:max-w-md sm:rounded-3xl sm:p-6"><div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-red-100 text-red-700"><AlertTriangle className="h-6 w-6" /></div><h2 className="mt-4 text-xl font-black text-slate-900">Cancel membership?</h2><p className="mt-2 text-sm leading-6 text-slate-600">Access will stop immediately, but this member remains saved and can be renewed or reactivated later.</p><label className="mt-5 block"><span className="text-xs font-bold text-slate-600">Cancellation reason *</span><textarea required rows={4} value={cancelReason} onChange={event => setCancelReason(event.target.value)} placeholder="Enter a clear reason..." className="mt-1.5 w-full rounded-xl border border-slate-200 p-3 outline-none focus:border-red-500" /></label><div className="mt-6 grid grid-cols-2 gap-3"><button type="button" onClick={() => setModal(null)} className="h-11 rounded-xl border border-slate-200 font-bold text-slate-600">Keep Active</button><button type="submit" disabled={processing} className="flex h-11 items-center justify-center gap-2 rounded-xl bg-red-600 font-bold text-white disabled:opacity-60">{processing ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />} Cancel</button></div></form></div> : null}
+
+      {modal === 'renew' ? <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/65 p-0 backdrop-blur-sm sm:items-center sm:p-4"><form onSubmit={submitRenewal} className="max-h-[94vh] w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-2xl sm:max-w-lg sm:rounded-3xl sm:p-6"><div className="flex items-start justify-between"><div><h2 className="text-xl font-black text-slate-900">{member.status === 'Cancelled' ? 'Renew and reactivate' : 'Renew membership'}</h2><p className="mt-1 text-sm text-slate-500">Start a clean membership period with new fees.</p></div><button type="button" onClick={() => setModal(null)} className="rounded-xl bg-slate-100 p-2"><X className="h-5 w-5" /></button></div><div className="mt-6 space-y-4"><label className="block"><span className="text-xs font-bold text-slate-600">Membership plan *</span><select required value={renewal.planId} onChange={event => updateRenewalPlan(event.target.value)} className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 outline-none focus:border-blue-500"><option value="">Select plan</option>{plans.map(plan => <option key={plan.id} value={plan.id}>{plan.name} — {plan.duration} — {currency(plan.price)}</option>)}</select></label><div className="grid grid-cols-2 gap-3"><label><span className="text-xs font-bold text-slate-600">Start date *</span><input type="date" required value={renewal.startDate} onChange={event => updateRenewalStart(event.target.value)} className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 outline-none focus:border-blue-500" /></label><label><span className="text-xs font-bold text-slate-600">New expiry</span><input type="date" readOnly value={renewal.expiryDate} className="mt-1.5 h-11 w-full rounded-xl border border-emerald-200 bg-emerald-50 px-3 font-bold text-emerald-700" /></label></div><label className="block"><span className="text-xs font-bold text-slate-600">Membership fee</span><input type="number" min="0" value={renewal.membershipFee} onChange={event => setRenewal(current => ({ ...current, membershipFee: Number(event.target.value) }))} className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 outline-none focus:border-blue-500" /></label>{money(member.personalTrainingFee) > 0 ? <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-violet-200 bg-violet-50 p-4"><input type="checkbox" checked={renewal.keepPersonalTraining} onChange={event => setRenewal(current => ({ ...current, keepPersonalTraining: event.target.checked }))} className="mt-1 h-4 w-4" /><span><span className="block text-sm font-black text-violet-900">Continue personal training</span><span className="mt-1 block text-xs text-violet-700">{member.personalTrainingPlanName} · {currency(member.personalTrainingFee)}</span></span></label> : null}<div className="rounded-2xl bg-slate-950 p-4 text-white"><div className="flex justify-between text-xs text-slate-300"><span>{selectedRenewalPlan?.name || 'New membership'}</span><span>{selectedRenewalPlan?.duration || '—'}</span></div><div className="mt-3 flex items-end justify-between"><span className="text-sm font-semibold text-slate-300">New total fee</span><span className="text-2xl font-black">{currency(renewalTotal)}</span></div><p className="mt-2 text-[11px] leading-5 text-slate-400">Previous payment history remains safe. Current member totals reset for the new period.</p></div></div><div className="mt-6 grid grid-cols-2 gap-3"><button type="button" onClick={() => setModal(null)} className="h-11 rounded-xl border border-slate-200 font-bold text-slate-600">Close</button><button type="submit" disabled={processing || !renewal.planId} className="flex h-11 items-center justify-center gap-2 rounded-xl bg-blue-600 font-bold text-white disabled:opacity-50">{processing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Renew</button></div></form></div> : null}
     </div>
   );
 };

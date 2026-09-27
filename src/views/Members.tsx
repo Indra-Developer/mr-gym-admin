@@ -234,7 +234,7 @@ export const Members: React.FC = () => {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex justify-end gap-2">
-                          <button onClick={(e) => handleView(e, m.id)} title="View Member" className="p-1.5 text-[#6B7280] hover:text-[#2563EB] bg-gray-50 rounded-md border border-[#E5E7EB] transition-colors"><Eye className="h-4 w-4" /></button>
+                          <button onClick={(e) => handleView(e, m.id)} title="View Member Details" className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-bold text-[#2563EB] transition-colors hover:border-blue-300 hover:bg-blue-100"><Eye className="h-4 w-4" /> View details</button>
                           <button onClick={(e) => handleEdit(e, m.id)} title="Edit Member" className="p-1.5 text-[#6B7280] hover:text-[#2563EB] bg-gray-50 rounded-md border border-[#E5E7EB] transition-colors"><Edit className="h-4 w-4" /></button>
                           <a href={getWhatsAppLink(m)} target="_blank" rel="noreferrer" onClick={handleWhatsApp} title="WhatsApp" className="p-1.5 text-white bg-[#25D366] hover:bg-[#20bd5a] rounded-md shadow-sm transition-colors"><MessageCircle className="h-4 w-4" /></a>
                           <button onClick={(e) => handleDelete(e, m.id, m.fullName)} title="Delete Member" className="p-1.5 text-[#6B7280] hover:text-[#DC2626] bg-gray-50 rounded-md border border-[#E5E7EB] transition-colors"><Trash2 className="h-4 w-4" /></button>
@@ -325,7 +325,7 @@ export const Members: React.FC = () => {
                  </div>
 
                  <div className="grid grid-cols-2 gap-2 pt-3 border-t border-[#F3F4F6]">
-                   <button onClick={(e) => handleView(e, m.id)} className="h-10 flex items-center justify-center gap-2 text-xs font-semibold text-[#2563EB] bg-[#2563EB]/10 rounded-lg"><Eye className="h-4 w-4" /> View</button>
+                   <button onClick={(e) => handleView(e, m.id)} className="h-10 flex items-center justify-center gap-2 text-xs font-semibold text-[#2563EB] bg-[#2563EB]/10 rounded-lg"><Eye className="h-4 w-4" /> View details</button>
                    <button onClick={(e) => handleEdit(e, m.id)} className="h-10 flex items-center justify-center gap-2 text-xs font-semibold text-[#4B5563] bg-gray-100 rounded-lg"><Edit className="h-4 w-4" /> Edit</button>
                    <a href={getWhatsAppLink(m)} target="_blank" rel="noreferrer" onClick={handleWhatsApp} className="h-10 flex items-center justify-center gap-2 text-xs font-semibold text-white bg-[#25D366] rounded-lg shadow-sm"><MessageCircle className="h-4 w-4" /> WhatsApp</a>
                    <button onClick={(e) => handleDelete(e, m.id, m.fullName)} className="h-10 flex items-center justify-center gap-2 text-xs font-semibold text-[#DC2626] bg-[#DC2626]/10 rounded-lg"><Trash2 className="h-4 w-4" /> Delete</button>
